@@ -1,5 +1,9 @@
 # ForgeAgent
 
+<p align="center">
+  <img src="assets/forgeagent-hero.png" alt="ForgeAgent DeepSeek-native local AI agent workspace" width="100%" />
+</p>
+
 **DeepSeek-native local AI agent workspace for Mac, Chrome, Android, MCP, browser automation, long-context coding, and private multi-device workflows.**
 
 ForgeAgent 是一个本地优先的 AI Agent 工作台，也是一个面向 DeepSeek 的 agent harness。它运行在你的 Mac 上，以项目文件夹为工作区，让 Agent 能在受控权限下读写文件、执行工具、使用 Chrome、调用 MCP server，并通过 Web Console、macOS App 和 Android App 多端协同。

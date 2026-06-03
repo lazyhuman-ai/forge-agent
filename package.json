@@ -1,6 +1,21 @@
 {
   "name": "forgeagent",
   "version": "0.1.0",
+  "description": "DeepSeek-native local AI agent workspace for Mac, Chrome, Android, MCP, browser automation, and private multi-device workflows.",
+  "keywords": [
+    "deepseek",
+    "deepseek-agent",
+    "ai-agent",
+    "agent-harness",
+    "local-first",
+    "mcp",
+    "browser-agent",
+    "chrome-automation",
+    "coding-agent",
+    "web-console",
+    "android",
+    "macos"
+  ],
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

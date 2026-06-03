@@ -1,6 +1,10 @@
 # ForgeAgent
 
-ForgeAgent 是一个本地优先的 AI Agent 工作台。它运行在你的 Mac 上，以项目文件夹为工作区，让 Agent 能在受控权限下读写文件、执行工具、使用 Chrome、调用 MCP server，并通过 Web Console、macOS App 和 Android App 多端协同。
+**DeepSeek-native local AI agent workspace for Mac, Chrome, Android, MCP, browser automation, long-context coding, and private multi-device workflows.**
+
+ForgeAgent 是一个本地优先的 AI Agent 工作台，也是一个面向 DeepSeek 的 agent harness。它运行在你的 Mac 上，以项目文件夹为工作区，让 Agent 能在受控权限下读写文件、执行工具、使用 Chrome、调用 MCP server，并通过 Web Console、macOS App 和 Android App 多端协同。
+
+如果你在寻找 **DeepSeek Agent**、**本地 AI Agent**、**Claude Code / Codex 风格工作台**、**MCP client**、**Chrome browser agent**、**long-context agent harness** 或 **Android 远程控制 Mac 上的 AI Agent**，ForgeAgent 的目标就是把这些能力合成一个本地产品。
 
 核心原则很简单：
 
@@ -11,6 +15,7 @@ ForgeAgent 是一个本地优先的 AI Agent 工作台。它运行在你的 Mac 
 
 ## 主要能力
 
+- DeepSeek-native agent harness：真实 token usage、context usage、prefix cache hit/miss、reasoning token 和成本记录
 - 多 session、多项目、多设备同步
 - 本地 Web Console，支持 Markdown、受限 HTML、代码块、文件上传和消息分叉
 - macOS App：启动或复用本机 Forge Core，并承载完整 Web Console
@@ -21,6 +26,19 @@ ForgeAgent 是一个本地优先的 AI Agent 工作台。它运行在你的 Mac 
 - MCP client：连接 stdio、streamable-http、legacy SSE MCP server
 - Artifact 自动落盘：大工具输出保存为 artifact，消息流保留预览和指针
 - 长期记忆、skills、scheduler、runtime recovery、通知
+
+## 为什么是 DeepSeek-native
+
+ForgeAgent 优先适配 DeepSeek API，而不是只把 DeepSeek 当成普通 OpenAI-compatible endpoint：
+
+- 读取真实 `prompt_tokens`、`completion_tokens`、`total_tokens`
+- 读取 prefix cache hit/miss，用于观察缓存命中率
+- 读取 reasoning tokens，用于区分推理消耗和输出消耗
+- 使用真实 context usage 触发 compaction，避免靠粗略估算误导用户
+- compaction 后先显示本地估计的压缩后上下文占用，下一次模型调用再用 provider telemetry 校准
+- 每次模型调用写入 usage ledger，并通过 Web Console / HTTP / SSE 展示
+
+这让 ForgeAgent 更适合作为 DeepSeek 长上下文 Agent、代码工作台、浏览器自动化 Agent 和多工具 agent runtime。
 
 ## 快速开始
 

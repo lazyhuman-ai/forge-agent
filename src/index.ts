@@ -109,6 +109,14 @@ export { parseCronSchedule, validateSchedule, parseCronExpression } from "./core
 export type { CronFields } from "./core/cron-parser.js";
 export { ShellWorkspace } from "./runtimes/shell/shell-workspace.js";
 export type { ShellResult } from "./runtimes/shell/shell-workspace.js";
+export { TerminalManager } from "./runtimes/terminal/terminal-manager.js";
+export type {
+  CreateTerminalSessionInput,
+  TerminalOutputEvent,
+  TerminalSessionSnapshot,
+  TerminalStatus,
+  TerminalStream,
+} from "./runtimes/terminal/terminal-manager.js";
 export { ProjectStore, defaultWorkspacePath } from "./projects/project-store.js";
 export type {
   CreateProjectInput,

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MouseEvent } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, MouseEvent, RefObject } from "react";
 import QRCode from "qrcode";
 import { api, ensureDeviceToken, forgetDeviceToken } from "./api";
 import { AssistantContent } from "./AssistantContent";
 import { RichText } from "./RichText";
 import { openHtmlPreviewDocument } from "./html-preview-window";
+import { useEnterSubmit } from "./ime";
 import { buildRenderEvents, type RenderEvent } from "./render-events";
+import { renderTerminalOutput } from "./terminal-renderer";
 import { sessionIndicator } from "./session-ui";
 import { nativeNotificationForEvent } from "./notifications";
 import type {
@@ -18,6 +20,8 @@ import type {
   SessionEvent,
   SessionUsageSummary,
   SetupStatus,
+  TerminalOutputEvent,
+  TerminalSession,
 } from "./types";
 
 type LoadState = "booting" | "ready" | "error";
@@ -151,6 +155,11 @@ export function App() {
   const [dangerNotice, setDangerNotice] = useState("");
   const [dangerConfirm, setDangerConfirm] = useState(false);
   const [projectBusy, setProjectBusy] = useState(false);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalBusy, setTerminalBusy] = useState(false);
+  const [terminalSession, setTerminalSession] = useState<TerminalSession | null>(null);
+  const [terminalEvents, setTerminalEvents] = useState<TerminalOutputEvent[]>([]);
+  const [terminalError, setTerminalError] = useState("");
   const selectedIdRef = useRef("");
   const selectedProjectIdRef = useRef("");
   const selectedBranchIdRef = useRef("main");
@@ -165,6 +174,10 @@ export function App() {
   const stickToBottomRef = useRef(true);
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const terminalScrollRef = useRef<HTMLDivElement | null>(null);
+  const terminalPaneRef = useRef<HTMLDivElement | null>(null);
+  const terminalSourceRef = useRef<EventSource | null>(null);
+  const terminalSeqRef = useRef(0);
 
   const selected = useMemo(
     () => sessions.find((session) => session.id === selectedId) ?? null,
@@ -531,6 +544,21 @@ export function App() {
     textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
   }, [draft]);
 
+  useEffect(() => {
+    return () => {
+      terminalSourceRef.current?.close();
+      terminalSourceRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!terminalOpen) return;
+    window.requestAnimationFrame(() => {
+      const scroll = terminalScrollRef.current;
+      if (scroll) scroll.scrollTop = scroll.scrollHeight;
+    });
+  }, [terminalEvents, terminalOpen]);
+
   async function submitMessage() {
     const text = draft.trim();
     if ((!text && attachments.length === 0) || busy) return;
@@ -833,6 +861,122 @@ export function App() {
     }
   }
 
+  function appendTerminalEvents(events: TerminalOutputEvent[]) {
+    if (events.length === 0) return;
+    terminalSeqRef.current = events.reduce((max, event) => Math.max(max, event.seq), terminalSeqRef.current);
+    setTerminalEvents((current) => {
+      const seen = new Set(current.map((event) => event.seq));
+      const next = [...current];
+      for (const event of events) {
+        if (!seen.has(event.seq)) next.push(event);
+      }
+      next.sort((a, b) => a.seq - b.seq);
+      return next.slice(-1000);
+    });
+  }
+
+  async function attachTerminalStream(terminalId: string) {
+    terminalSourceRef.current?.close();
+    terminalSourceRef.current = null;
+    const issued = await api.streamToken();
+    const source = new EventSource(
+      `/terminal/sessions/${terminalId}/events?afterSeq=${terminalSeqRef.current}&stream_token=${encodeURIComponent(issued.code)}`,
+    );
+    source.addEventListener("terminal_output", (event) => {
+      try {
+        appendTerminalEvents([JSON.parse((event as MessageEvent).data) as TerminalOutputEvent]);
+      } catch {
+        setTerminalError("Could not parse terminal output.");
+      }
+    });
+    source.onerror = () => {
+      setTerminalError("Terminal stream disconnected. Output will resume when the panel reconnects.");
+    };
+    terminalSourceRef.current = source;
+  }
+
+  async function openTerminal() {
+    setTerminalOpen(true);
+    setTerminalBusy(true);
+    setTerminalError("");
+    try {
+      let snapshot = terminalSession;
+      if (!snapshot) {
+        snapshot = await api.createTerminalSession(terminalLaunchInput(selectedProjectIdRef.current));
+      }
+      setTerminalSession(snapshot);
+      terminalSeqRef.current = 0;
+      setTerminalEvents(snapshot.events);
+      appendTerminalEvents(snapshot.events);
+      await attachTerminalStream(snapshot.id);
+      window.requestAnimationFrame(() => terminalPaneRef.current?.focus());
+    } catch (err) {
+      setTerminalError(terminalErrorMessage(err));
+    } finally {
+      setTerminalBusy(false);
+    }
+  }
+
+  function closeTerminal() {
+    setTerminalOpen(false);
+    terminalSourceRef.current?.close();
+    terminalSourceRef.current = null;
+  }
+
+  async function sendTerminalData(data: string) {
+    if (!terminalSession || !data) return;
+    setTerminalError("");
+    try {
+      const snapshot = await api.writeTerminalInput(terminalSession.id, data);
+      setTerminalSession(snapshot);
+      appendTerminalEvents(snapshot.events);
+    } catch (err) {
+      setTerminalError(terminalErrorMessage(err));
+    }
+  }
+
+  async function stopTerminal() {
+    if (!terminalSession) return;
+    setTerminalError("");
+    try {
+      await api.stopTerminal(terminalSession.id);
+      const snapshot = await api.terminalSnapshot(terminalSession.id);
+      setTerminalSession(snapshot);
+      appendTerminalEvents(snapshot.events);
+    } catch (err) {
+      setTerminalError(terminalErrorMessage(err));
+    }
+  }
+
+  async function restartTerminal() {
+    setTerminalBusy(true);
+    setTerminalError("");
+    try {
+      if (terminalSession) {
+        try {
+          await api.deleteTerminal(terminalSession.id);
+        } catch {
+          // Starting a fresh terminal is still useful if deletion races with process exit.
+        }
+      }
+      terminalSourceRef.current?.close();
+      terminalSourceRef.current = null;
+      terminalSeqRef.current = 0;
+      setTerminalSession(null);
+      setTerminalEvents([]);
+      const snapshot = await api.createTerminalSession(terminalLaunchInput(selectedProjectIdRef.current));
+      setTerminalSession(snapshot);
+      setTerminalEvents(snapshot.events);
+      appendTerminalEvents(snapshot.events);
+      await attachTerminalStream(snapshot.id);
+      window.requestAnimationFrame(() => terminalPaneRef.current?.focus());
+    } catch (err) {
+      setTerminalError(terminalErrorMessage(err));
+    } finally {
+      setTerminalBusy(false);
+    }
+  }
+
   async function runInterrupt() {
     if (!selected) return;
     try {
@@ -854,6 +998,10 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err));
     }
   }
+
+  const composerEnterSubmit = useEnterSubmit(() => {
+    void submitMessage();
+  });
 
   if (loadState === "booting") {
     return <div className="boot">Opening ForgeAgent…</div>;
@@ -1003,6 +1151,13 @@ export function App() {
             </div>
           </div>
           <div className="header-actions">
+            <button
+              type="button"
+              className={terminalOpen ? "active-action" : ""}
+              onClick={() => terminalOpen ? closeTerminal() : void openTerminal()}
+            >
+              Terminal
+            </button>
             {selected?.status === "running" ? <button onClick={() => void runInterrupt()}>Interrupt</button> : null}
             {selected?.status === "blocked" ? <button onClick={() => void runRetry()}>Retry</button> : null}
           </div>
@@ -1110,12 +1265,9 @@ export function App() {
             placeholder={selected?.status === "running" ? "ForgeAgent is running…" : "Ask ForgeAgent anything…"}
             rows={1}
             disabled={selected?.status === "running"}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void submitMessage();
-              }
-            }}
+            onCompositionStart={composerEnterSubmit.onCompositionStart}
+            onCompositionEnd={composerEnterSubmit.onCompositionEnd}
+            onKeyDown={composerEnterSubmit.onKeyDown}
           />
           <div className="composer-actions">
             <button
@@ -1127,6 +1279,21 @@ export function App() {
             </button>
           </div>
         </footer>
+
+        {terminalOpen ? (
+          <TerminalPanel
+            session={terminalSession}
+            events={terminalEvents}
+            busy={terminalBusy}
+            error={terminalError}
+            scrollRef={terminalScrollRef}
+            paneRef={terminalPaneRef}
+            onInput={(data) => void sendTerminalData(data)}
+            onStop={() => void stopTerminal()}
+            onRestart={() => void restartTerminal()}
+            onClose={closeTerminal}
+          />
+        ) : null}
       </section>
 
       <StatusRail
@@ -1152,6 +1319,130 @@ export function App() {
         />
       ) : null}
     </main>
+  );
+}
+
+function terminalStatusText(session: TerminalSession | null, busy: boolean): string {
+  if (busy) return "starting";
+  if (!session) return "not started";
+  if (session.status === "running") return `running · pid ${session.pid ?? "?"}`;
+  return `exited${session.exitCode === null || session.exitCode === undefined ? "" : ` · code ${session.exitCode}`}`;
+}
+
+function terminalErrorMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.includes("ForgeAgent API returned non-JSON content")) {
+    return "Terminal API is not available from this page. Restart ForgeAgent Core, and if you are using Vite dev server, make sure /terminal is proxied to Core.";
+  }
+  if (message.includes("404")) {
+    return "Terminal API is not available in the running Core. Restart ForgeAgent so the latest backend routes are loaded.";
+  }
+  return message;
+}
+
+function terminalLaunchInput(projectId: string): { projectId?: string; cols: number; rows: number } {
+  return {
+    ...(projectId ? { projectId } : {}),
+    cols: 100,
+    rows: 28,
+  };
+}
+
+function terminalKeyData(event: ReactKeyboardEvent): string | null {
+  if (event.metaKey) return null;
+  if (event.ctrlKey && event.key.length === 1) {
+    const letter = event.key.toLowerCase();
+    if (letter >= "a" && letter <= "z") {
+      return String.fromCharCode(letter.charCodeAt(0) - 96);
+    }
+  }
+  switch (event.key) {
+    case "Enter": return "\r";
+    case "Backspace": return "\x7f";
+    case "Tab": return "\t";
+    case "Escape": return "\x1b";
+    case "ArrowUp": return "\x1b[A";
+    case "ArrowDown": return "\x1b[B";
+    case "ArrowRight": return "\x1b[C";
+    case "ArrowLeft": return "\x1b[D";
+    case "Delete": return "\x1b[3~";
+    case "Home": return "\x1b[H";
+    case "End": return "\x1b[F";
+    case "PageUp": return "\x1b[5~";
+    case "PageDown": return "\x1b[6~";
+    default:
+      if (!event.ctrlKey && !event.altKey && event.key.length === 1) return event.key;
+      return null;
+  }
+}
+
+function TerminalPanel(props: {
+  session: TerminalSession | null;
+  events: TerminalOutputEvent[];
+  busy: boolean;
+  error: string;
+  scrollRef: RefObject<HTMLDivElement | null>;
+  paneRef: RefObject<HTMLDivElement | null>;
+  onInput: (data: string) => void;
+  onStop: () => void;
+  onRestart: () => void;
+  onClose: () => void;
+}) {
+  const output = renderTerminalOutput(props.events);
+  const running = props.session?.status === "running";
+  return (
+    <section className="terminal-panel" aria-label="Interactive terminal">
+      <div className="terminal-header">
+        <div className="terminal-title">
+          <strong>Terminal</strong>
+          <span>{terminalStatusText(props.session, props.busy)}</span>
+        </div>
+        <div className="terminal-actions">
+          <button type="button" onClick={props.onStop} disabled={!running}>Stop</button>
+          <button type="button" onClick={props.onRestart} disabled={props.busy}>Restart</button>
+          <button type="button" className="icon-button" onClick={props.onClose} aria-label="Close terminal">×</button>
+        </div>
+      </div>
+      <div
+        className={`terminal-surface ${running ? "running" : ""}`}
+        ref={props.paneRef}
+        tabIndex={0}
+        role="textbox"
+        aria-multiline="true"
+        aria-label="Terminal input"
+        onClick={() => props.paneRef.current?.focus()}
+        onPaste={(event) => {
+          if (!running) return;
+          const text = event.clipboardData.getData("text");
+          if (!text) return;
+          event.preventDefault();
+          props.onInput(text);
+        }}
+        onKeyDown={(event) => {
+          if (!running) return;
+          const data = terminalKeyData(event);
+          if (!data) return;
+          event.preventDefault();
+          props.onInput(data);
+        }}
+      >
+        <div className="terminal-meta">
+          <span title={props.session?.cwd ?? ""}>{props.session?.cwd ?? "workspace"}</span>
+          <span>{props.session?.shell ?? "system shell"}</span>
+        </div>
+        <div className="terminal-output" ref={props.scrollRef}>
+          {output ? (
+            <pre>
+              {output}
+              {running ? <span className="terminal-caret" aria-hidden="true" /> : null}
+            </pre>
+          ) : (
+            <div className="terminal-empty">{props.busy ? "Starting shell…" : "Click here and type once the shell starts."}</div>
+          )}
+        </div>
+      </div>
+      {props.error ? <div className="terminal-error">{props.error}</div> : null}
+    </section>
   );
 }
 
@@ -1269,6 +1560,8 @@ function EventBlock(props: {
   onSubmitEdit: () => void;
 }) {
   const { event } = props;
+  const editEnterSubmit = useEnterSubmit(props.onSubmitEdit);
+
   async function openArtifact(artifactId: string) {
     try {
       const payload = await api.artifact(artifactId);
@@ -1334,12 +1627,9 @@ function EventBlock(props: {
             <textarea
               value={props.editingDraft}
               onChange={(change) => props.onEditingDraftChange(change.target.value)}
-              onKeyDown={(keyEvent) => {
-                if (keyEvent.key === "Enter" && !keyEvent.shiftKey) {
-                  keyEvent.preventDefault();
-                  props.onSubmitEdit();
-                }
-              }}
+              onCompositionStart={editEnterSubmit.onCompositionStart}
+              onCompositionEnd={editEnterSubmit.onCompositionEnd}
+              onKeyDown={editEnterSubmit.onKeyDown}
               rows={Math.min(10, Math.max(3, props.editingDraft.split("\n").length))}
               autoFocus
             />

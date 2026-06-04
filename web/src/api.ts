@@ -13,6 +13,7 @@ import type {
   SessionEvent,
   SessionUsageSummary,
   SetupStatus,
+  TerminalSession,
   UploadedSessionFile,
 } from "./types";
 
@@ -183,5 +184,24 @@ export const api = {
     if (sessionId) params.set("sessionId", sessionId);
     return apiFetch<HtmlFilePreview>(`/files/preview?${params.toString()}`);
   },
+  terminalSessions: () => apiFetch<TerminalSession[]>("/terminal/sessions"),
+  createTerminalSession: (input: { projectId?: string; cwd?: string; shell?: string; cols?: number; rows?: number }) =>
+    apiFetch<TerminalSession>("/terminal/sessions", { method: "POST", body: JSON.stringify(input) }),
+  terminalSnapshot: (terminalId: string, afterSeq = 0) =>
+    apiFetch<TerminalSession>(`/terminal/sessions/${terminalId}?afterSeq=${afterSeq}`),
+  writeTerminalInput: (terminalId: string, data: string) =>
+    apiFetch<TerminalSession>(`/terminal/sessions/${terminalId}/input`, {
+      method: "POST",
+      body: JSON.stringify({ data }),
+    }),
+  resizeTerminal: (terminalId: string, cols: number, rows: number) =>
+    apiFetch<TerminalSession>(`/terminal/sessions/${terminalId}/resize`, {
+      method: "POST",
+      body: JSON.stringify({ cols, rows }),
+    }),
+  stopTerminal: (terminalId: string) =>
+    apiFetch<{ stopped: boolean }>(`/terminal/sessions/${terminalId}/stop`, { method: "POST" }),
+  deleteTerminal: (terminalId: string) =>
+    apiFetch<{ deleted: boolean }>(`/terminal/sessions/${terminalId}`, { method: "DELETE" }),
   streamToken: () => apiFetch<{ code: string; expiresAt: string }>("/auth/stream-token", { method: "POST" }),
 };

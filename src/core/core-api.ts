@@ -91,6 +91,12 @@ import type { SessionUsageSummary, UsageRecord } from "../usage/usage-ledger.js"
 import { McpRuntimeManager } from "../mcp/runtime-manager.js";
 import { ProjectStore } from "../projects/project-store.js";
 import type { CreateProjectInput, Project, ProjectTrustState } from "../projects/project-store.js";
+import { TerminalManager } from "../runtimes/terminal/terminal-manager.js";
+import type {
+  CreateTerminalSessionInput,
+  TerminalOutputEvent,
+  TerminalSessionSnapshot,
+} from "../runtimes/terminal/terminal-manager.js";
 import type {
   McpCatalogEntry,
   McpElicitationPublicRequest,
@@ -334,6 +340,7 @@ export class CoreAPI {
   #projectStore: ProjectStore;
   #webridgeRuntime?: WebridgeRuntime;
   #mcpManager?: McpRuntimeManager;
+  #terminalManager?: TerminalManager;
 
   constructor(toolRegistry?: ToolRegistry, options?: {
     dataDir?: string;
@@ -1043,6 +1050,51 @@ export class CoreAPI {
     return project;
   }
 
+  // ── Interactive terminal ──
+
+  initTerminalManager(options?: { replace?: boolean }): TerminalManager {
+    if (!this.#terminalManager || options?.replace) {
+      this.#terminalManager = new TerminalManager();
+    }
+    return this.#terminalManager;
+  }
+
+  createTerminalSession(input: CreateTerminalSessionInput = {}): TerminalSessionSnapshot {
+    return this.initTerminalManager().create(input);
+  }
+
+  listTerminalSessions(): TerminalSessionSnapshot[] {
+    return this.initTerminalManager().list();
+  }
+
+  getTerminalSession(id: string, afterSeq = 0): TerminalSessionSnapshot | null {
+    return this.initTerminalManager().snapshot(id, afterSeq);
+  }
+
+  writeTerminalInput(id: string, data: string): TerminalSessionSnapshot | null {
+    return this.initTerminalManager().write(id, data);
+  }
+
+  resizeTerminalSession(id: string, cols?: number, rows?: number): TerminalSessionSnapshot | null {
+    return this.initTerminalManager().resize(id, cols, rows);
+  }
+
+  stopTerminalSession(id: string): boolean {
+    return this.initTerminalManager().stop(id);
+  }
+
+  removeTerminalSession(id: string): boolean {
+    return this.initTerminalManager().remove(id);
+  }
+
+  subscribeTerminalSession(
+    id: string,
+    afterSeq: number,
+    callback: (event: TerminalOutputEvent) => void,
+  ): (() => void) | null {
+    return this.initTerminalManager().subscribe(id, afterSeq, callback);
+  }
+
   getProjectSessions(projectId: string): Session[] {
     return this.listSessions().filter((session) => session.projectId === projectId);
   }
@@ -1654,6 +1706,7 @@ export class CoreAPI {
 	    this.#runtimeManager?.stop();
 	    this.#webridgeRuntime?.shutdown();
 	    this.#mcpManager?.stop();
+	    this.#terminalManager?.shutdown();
 	    this.#supervisor?.stop();
     for (const [, controller] of this.#turnControllers) {
       controller.abort();

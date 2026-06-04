@@ -115,6 +115,29 @@ export type UploadedSessionFile = {
   mimeType: string;
 };
 
+export type TerminalOutputEvent = {
+  seq: number;
+  timestamp: string;
+  stream: "stdout" | "stderr" | "system";
+  data: string;
+};
+
+export type TerminalSession = {
+  id: string;
+  pid?: number;
+  shell: string;
+  cwd: string;
+  status: "running" | "exited";
+  createdAt: string;
+  updatedAt: string;
+  cols: number;
+  rows: number;
+  exitCode: number | null;
+  signal: string | null;
+  events: TerminalOutputEvent[];
+  nextSeq: number;
+};
+
 export type WebridgeHealth = {
   enabled?: boolean;
   state?: "online" | "stale" | "offline" | string;

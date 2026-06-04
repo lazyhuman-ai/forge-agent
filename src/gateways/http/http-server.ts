@@ -728,6 +728,36 @@ function matchRoute(method: string, reqUrl: string): RouteMatch | null {
     return { handler: "handleSse", params: {} };
   }
 
+  if (segments.length >= 1 && s(0) === "terminal") {
+    if (method === "GET" && segments.length === 2 && s(1) === "sessions") {
+      return { handler: "listTerminalSessions", params: {} };
+    }
+    if (method === "POST" && segments.length === 2 && s(1) === "sessions") {
+      return { handler: "createTerminalSession", params: {} };
+    }
+    if (segments.length >= 3 && s(1) === "sessions") {
+      const terminalId = s(2)!;
+      if (method === "GET" && segments.length === 3) {
+        return { handler: "getTerminalSession", params: { terminalId } };
+      }
+      if (method === "DELETE" && segments.length === 3) {
+        return { handler: "deleteTerminalSession", params: { terminalId } };
+      }
+      if (method === "POST" && segments.length === 4 && s(3) === "input") {
+        return { handler: "writeTerminalInput", params: { terminalId } };
+      }
+      if (method === "POST" && segments.length === 4 && s(3) === "resize") {
+        return { handler: "resizeTerminalSession", params: { terminalId } };
+      }
+      if (method === "POST" && segments.length === 4 && s(3) === "stop") {
+        return { handler: "stopTerminalSession", params: { terminalId } };
+      }
+      if (method === "GET" && segments.length === 4 && s(3) === "events") {
+        return { handler: "streamTerminalSession", params: { terminalId } };
+      }
+    }
+  }
+
   if (segments.length >= 2 && s(0) === "sessions") {
     const id = s(1)!;
     if (method === "GET" && segments.length === 2) {
@@ -1194,6 +1224,17 @@ function isPublicHandler(handler: string): boolean {
     || handler === "finishMcpOAuthCallback";
 }
 
+function isTerminalHandler(handler: string): boolean {
+  return handler === "listTerminalSessions"
+    || handler === "createTerminalSession"
+    || handler === "getTerminalSession"
+    || handler === "writeTerminalInput"
+    || handler === "resizeTerminalSession"
+    || handler === "stopTerminalSession"
+    || handler === "deleteTerminalSession"
+    || handler === "streamTerminalSession";
+}
+
 export function createHttpServer(
   api: CoreAPI,
   gateway: HttpGateway,
@@ -1258,11 +1299,15 @@ async function handleRoute(
   const context =
     isPublicHandler(handler)
       ? null
-      : handler === "handleSse"
+      : handler === "handleSse" || handler === "streamTerminalSession"
         ? authenticateSse(req, options)
         : handler === "createPairingCode"
           ? authenticatePairingCodeRequest(req, options)
           : authenticateBearer(req, options);
+
+  if (isTerminalHandler(handler) && !isLoopback(req)) {
+    throw new ForbiddenError("Terminal is only available from this computer.");
+  }
 
   switch (handler) {
     case "health": {
@@ -1852,6 +1897,105 @@ async function handleRoute(
 
     case "diagnostics": {
       sendJson(res, 200, buildDiagnosticsPayload(api, options), origin);
+      return;
+    }
+
+    case "listTerminalSessions": {
+      sendJson(res, 200, api.listTerminalSessions(), origin);
+      return;
+    }
+
+    case "createTerminalSession": {
+      const body = await parseJson(req, options.maxBodyBytes);
+      const projectId = typeof body.projectId === "string" ? body.projectId : "";
+      const project = projectId ? api.getProject(projectId) : null;
+      const cwd = project?.path ?? (typeof body.cwd === "string" ? body.cwd : undefined);
+      const shell = typeof body.shell === "string" ? body.shell : undefined;
+      const cols = typeof body.cols === "number" ? body.cols : undefined;
+      const rows = typeof body.rows === "number" ? body.rows : undefined;
+      const input: Parameters<CoreAPI["createTerminalSession"]>[0] = {};
+      if (cwd !== undefined) input.cwd = cwd;
+      if (shell !== undefined) input.shell = shell;
+      if (cols !== undefined) input.cols = cols;
+      if (rows !== undefined) input.rows = rows;
+      sendJson(res, 201, api.createTerminalSession(input), origin);
+      return;
+    }
+
+    case "getTerminalSession": {
+      const afterSeq = parseSeq(routeUrl(req).searchParams.get("afterSeq"));
+      const snapshot = api.getTerminalSession(params.terminalId!, afterSeq);
+      if (!snapshot) { sendError(res, 404, "Terminal session not found", origin); return; }
+      sendJson(res, 200, snapshot, origin);
+      return;
+    }
+
+    case "writeTerminalInput": {
+      const body = await parseJson(req, options.maxBodyBytes);
+      const data = typeof body.data === "string" ? body.data : "";
+      if (!data) { sendError(res, 400, "Missing terminal input data", origin); return; }
+      if (data.length > 100_000) { sendError(res, 413, "Terminal input is too large.", origin); return; }
+      const snapshot = api.writeTerminalInput(params.terminalId!, data);
+      if (!snapshot) { sendError(res, 404, "Terminal session not found", origin); return; }
+      sendJson(res, 200, snapshot, origin);
+      return;
+    }
+
+    case "resizeTerminalSession": {
+      const body = await parseJson(req, options.maxBodyBytes);
+      const cols = typeof body.cols === "number" ? body.cols : undefined;
+      const rows = typeof body.rows === "number" ? body.rows : undefined;
+      const snapshot = api.resizeTerminalSession(params.terminalId!, cols, rows);
+      if (!snapshot) { sendError(res, 404, "Terminal session not found", origin); return; }
+      sendJson(res, 200, snapshot, origin);
+      return;
+    }
+
+    case "stopTerminalSession": {
+      const ok = api.stopTerminalSession(params.terminalId!);
+      if (!ok) { sendError(res, 404, "Terminal session not found", origin); return; }
+      sendJson(res, 200, { stopped: true }, origin);
+      return;
+    }
+
+    case "deleteTerminalSession": {
+      const ok = api.removeTerminalSession(params.terminalId!);
+      if (!ok) { sendError(res, 404, "Terminal session not found", origin); return; }
+      sendJson(res, 200, { deleted: true }, origin);
+      return;
+    }
+
+    case "streamTerminalSession": {
+      const afterSeq = parseSeq(routeUrl(req).searchParams.get("afterSeq"));
+      const snapshot = api.getTerminalSession(params.terminalId!);
+      if (!snapshot) { sendError(res, 404, "Terminal session not found", origin); return; }
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        ...corsHeaders(origin),
+      });
+      res.write(`event: connected\ndata: ${JSON.stringify({ terminalId: params.terminalId, deviceId: requireContext(context).device.id })}\n\n`);
+      const unsubscribe = api.subscribeTerminalSession(params.terminalId!, afterSeq, (event) => {
+        res.write(`event: terminal_output\ndata: ${JSON.stringify(event)}\n\n`);
+      });
+      if (!unsubscribe) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: "Terminal session not found" })}\n\n`);
+        res.end();
+        return;
+      }
+      const keepAlive = setInterval(() => {
+        try {
+          res.write(": keepalive\n\n");
+        } catch {
+          clearInterval(keepAlive);
+          unsubscribe();
+        }
+      }, 30_000);
+      req.on("close", () => {
+        clearInterval(keepAlive);
+        unsubscribe();
+      });
       return;
     }
 

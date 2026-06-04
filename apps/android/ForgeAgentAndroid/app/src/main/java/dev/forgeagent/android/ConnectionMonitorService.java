@@ -7,7 +7,6 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.os.IBinder;
 
@@ -38,7 +37,8 @@ public final class ConnectionMonitorService extends Service {
 
     private ScheduledExecutorService executor;
     private ExecutorService eventExecutor;
-    private SharedPreferences prefs;
+    private ConnectionStore connectionStore;
+    private EndpointResolver endpointResolver;
     private volatile boolean connected;
     private volatile String lastMessage = "Checking ForgeAgent...";
     private volatile boolean stopped;
@@ -47,7 +47,8 @@ public final class ConnectionMonitorService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        prefs = getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE);
+        connectionStore = new ConnectionStore(this);
+        endpointResolver = new EndpointResolver(connectionStore);
         ensureChannels();
         startForeground(CONNECTION_NOTIFICATION_ID, buildConnectionNotification("Checking ForgeAgent...", false));
         executor = Executors.newSingleThreadScheduledExecutor();
@@ -58,8 +59,7 @@ public final class ConnectionMonitorService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        String token = prefs.getString(MainActivity.PREF_TOKEN, "");
-        if (token == null || token.isEmpty()) {
+        if (connectionStore == null || !connectionStore.hasAnyToken()) {
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -81,38 +81,17 @@ public final class ConnectionMonitorService extends Service {
     }
 
     private void pollHealth() {
-        String baseUrl = prefs.getString(MainActivity.PREF_BASE_URL, "");
-        String token = prefs.getString(MainActivity.PREF_TOKEN, "");
-        if (token == null || token.isEmpty()) {
+        ForgeConnection connection = connectionStore.active();
+        if (connection == null || !connection.hasToken()) {
             stopSelf();
             return;
         }
-        if (baseUrl == null || baseUrl.isEmpty()) {
-            connected = false;
-            lastMessage = "ForgeAgent is not paired.";
-            updateNotification();
-            return;
-        }
-        try {
-            URL url = new URL(trimTrailingSlash(baseUrl) + "/health");
-            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(8000);
-            connection.setReadTimeout(8000);
-            int status = connection.getResponseCode();
-            try (InputStream stream = status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream()) {
-                if (stream != null) while (stream.read() != -1) {
-                    // Drain the response so the connection can be reused cleanly.
-                }
-            }
-            connected = status >= 200 && status < 300;
-            lastMessage = connected
-                ? "Connected to " + hostLabel(baseUrl)
-                : "ForgeAgent returned HTTP " + status;
-        } catch (Exception ex) {
-            connected = false;
-            lastMessage = "Cannot reach " + hostLabel(baseUrl) + ": " + (ex.getMessage() == null ? ex.toString() : ex.getMessage());
-        }
+        EndpointResolver.Result result = endpointResolver.resolve(connection);
+        connected = result.ok;
+        ForgeConnection updated = connectionStore.get(connection.connectionId);
+        lastMessage = result.ok
+            ? "Connected to " + (updated == null ? connection.name : updated.name)
+            : result.message;
         updateNotification();
     }
 
@@ -186,19 +165,18 @@ public final class ConnectionMonitorService extends Service {
     private void runEventLoop() {
         long backoffMs = 1_000;
         while (!stopped) {
-            String token = prefs.getString(MainActivity.PREF_TOKEN, "");
-            String baseUrl = prefs.getString(MainActivity.PREF_BASE_URL, "");
-            if (token == null || token.isEmpty()) {
+            ForgeConnection connection = connectionStore.active();
+            if (connection == null || !connection.hasToken()) {
                 stopSelf();
                 return;
             }
-            if (baseUrl == null || baseUrl.isEmpty()) {
-                sleep(backoffMs);
-                continue;
-            }
             try {
-                refreshDeviceMuteState(baseUrl, token);
-                listenForEvents(baseUrl, token);
+                EndpointResolver.Result resolved = endpointResolver.resolve(connection);
+                if (!resolved.ok) throw new IllegalStateException(resolved.message);
+                ForgeConnection updated = connectionStore.get(connection.connectionId);
+                if (updated == null) updated = connection;
+                refreshDeviceMuteState(resolved.endpoint, updated.token);
+                listenForEvents(resolved.endpoint, updated);
                 backoffMs = 1_000;
             } catch (Exception ex) {
                 backoffMs = Math.min(30_000, Math.max(1_000, backoffMs * 2));
@@ -207,14 +185,14 @@ public final class ConnectionMonitorService extends Service {
         }
     }
 
-    private void listenForEvents(String baseUrl, String token) throws Exception {
-        long cursor = prefs.getLong(MainActivity.PREF_LAST_EVENT_SEQ, prefs.getLong(MainActivity.PREF_LAST_NOTIFIED_SEQ, 0));
+    private void listenForEvents(String baseUrl, ForgeConnection connectionInfo) throws Exception {
+        long cursor = Math.max(connectionInfo.lastEventSeq, connectionInfo.lastNotifiedSeq);
         URL url = new URL(trimTrailingSlash(baseUrl) + "/events?cursor=" + cursor);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setRequestMethod("GET");
         connection.setConnectTimeout(15_000);
         connection.setReadTimeout(0);
-        connection.setRequestProperty("Authorization", "Bearer " + token);
+        connection.setRequestProperty("Authorization", "Bearer " + connectionInfo.token);
         int status = connection.getResponseCode();
         if (status < 200 || status >= 300) {
             drain(status >= 400 ? connection.getErrorStream() : connection.getInputStream());
@@ -225,8 +203,9 @@ public final class ConnectionMonitorService extends Service {
             StringBuilder data = new StringBuilder();
             String line;
             while (!stopped && (line = reader.readLine()) != null) {
+                if (!connectionInfo.connectionId.equals(connectionStore.activeId())) return;
                 if (line.isEmpty()) {
-                    handleSseEvent(eventType, data.toString());
+                    handleSseEvent(connectionInfo.connectionId, eventType, data.toString());
                     eventType = "";
                     data.setLength(0);
                 } else if (line.startsWith("event:")) {
@@ -239,35 +218,40 @@ public final class ConnectionMonitorService extends Service {
         }
     }
 
-    private void handleSseEvent(String eventType, String data) {
+    private void handleSseEvent(String connectionId, String eventType, String data) {
         if (!"session_event".equals(eventType) || data == null || data.isEmpty()) return;
         try {
             JSONObject wrapper = new JSONObject(data);
             String sessionId = wrapper.optString("sessionId", "");
             JSONObject event = wrapper.optJSONObject("event");
             if (event == null) return;
+            ForgeConnection connection = connectionStore.get(connectionId);
+            if (connection == null) return;
             long seq = event.optLong("seq", 0);
             if (seq > 0) {
-                prefs.edit().putLong(MainActivity.PREF_LAST_EVENT_SEQ, Math.max(seq, prefs.getLong(MainActivity.PREF_LAST_EVENT_SEQ, 0))).apply();
+                connection.lastEventSeq = Math.max(seq, connection.lastEventSeq);
+                connectionStore.upsert(connection);
             }
-            if (!shouldNotify(sessionId, event)) return;
+            if (!shouldNotify(connection, sessionId, event)) return;
             NotificationPayload payload = notificationPayload(sessionId, event);
             if (payload == null) return;
             NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             if (manager != null) {
                 manager.notify(ACTIVITY_NOTIFICATION_BASE_ID + (int) (seq % 100_000), buildActivityNotification(payload.title, payload.body, sessionId, seq));
             }
-            prefs.edit().putLong(MainActivity.PREF_LAST_NOTIFIED_SEQ, Math.max(seq, prefs.getLong(MainActivity.PREF_LAST_NOTIFIED_SEQ, 0))).apply();
+            connection.lastNotifiedSeq = Math.max(seq, connection.lastNotifiedSeq);
+            connectionStore.upsert(connection);
         } catch (Exception ignored) {
         }
     }
 
-    private boolean shouldNotify(String sessionId, JSONObject event) {
-        if (!prefs.getBoolean(MainActivity.PREF_ACTIVITY_NOTIFICATIONS, true)) return false;
+    private boolean shouldNotify(ForgeConnection connection, String sessionId, JSONObject event) {
+        if (!connection.activityNotifications) return false;
         long seq = event.optLong("seq", 0);
-        if (seq <= prefs.getLong(MainActivity.PREF_LAST_NOTIFIED_SEQ, 0)) return false;
+        if (seq <= connection.lastNotifiedSeq) return false;
         if (sessionId != null && mutedSessionIds.contains(sessionId)) {
-            prefs.edit().putLong(MainActivity.PREF_LAST_NOTIFIED_SEQ, Math.max(seq, prefs.getLong(MainActivity.PREF_LAST_NOTIFIED_SEQ, 0))).apply();
+            connection.lastNotifiedSeq = Math.max(seq, connection.lastNotifiedSeq);
+            connectionStore.upsert(connection);
             return false;
         }
         String type = event.optString("type", "");

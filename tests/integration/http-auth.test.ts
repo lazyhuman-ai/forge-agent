@@ -194,12 +194,23 @@ describe("HTTP Gateway auth and multi-device sync", () => {
   });
 
   it("exposes unauthenticated health and discovery for local clients", async () => {
+    const identity = await request("GET", "/identity");
+    expect(identity.status).toBe(200);
+    expect(identity.data).toMatchObject({
+      app: "ForgeAgent",
+      protocolVersion: 1,
+    });
+    expect((identity.data as { coreId: string }).coreId).toMatch(/^forge-core-/);
+    const persisted = JSON.parse(readFileSync(join(DATA_DIR, "identity.json"), "utf-8")) as { coreId: string };
+    expect(persisted.coreId).toBe((identity.data as { coreId: string }).coreId);
+
     const health = await request("GET", "/health");
     expect(health.status).toBe(200);
     expect(health.data).toMatchObject({
       app: "ForgeAgent",
       status: "ready",
       auth: { mode: "device" },
+      coreId: (identity.data as { coreId: string }).coreId,
     });
 
     const discovery = await request("GET", "/discovery", {
@@ -217,6 +228,22 @@ describe("HTTP Gateway auth and multi-device sync", () => {
       },
     });
     expect((discovery.data as { endpoints: { pairingCodes: string } }).endpoints.pairingCodes).toContain("/auth/pairing-codes");
+  });
+
+  it("returns desktop identity and endpoint candidates when pairing Android", async () => {
+    const identity = await request("GET", "/identity");
+    const code = authStore.issuePairingCode();
+    const paired = await request("POST", "/auth/pair", {
+      body: { code: code.code, name: "Pixel 9", kind: "android" },
+    });
+    expect(paired.status).toBe(201);
+    expect(paired.data).toMatchObject({
+      coreId: (identity.data as { coreId: string }).coreId,
+      desktopName: (identity.data as { desktopName: string }).desktopName,
+      protocolVersion: 1,
+    });
+    expect((paired.data as { token: string }).token).toMatch(/^fa_dev_/);
+    expect((paired.data as { networkUrls: { preferredUrl: string } }).networkUrls.preferredUrl).toMatch(/^http:\/\//);
   });
 
   it("revokes devices", async () => {

@@ -149,6 +149,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [dangerBusy, setDangerBusy] = useState(false);
   const [dangerNotice, setDangerNotice] = useState("");
+  const [dangerConfirm, setDangerConfirm] = useState(false);
   const [projectBusy, setProjectBusy] = useState(false);
   const selectedIdRef = useRef("");
   const selectedProjectIdRef = useRef("");
@@ -439,6 +440,8 @@ export function App() {
   useEffect(() => {
     selectedIdRef.current = selectedId;
     setAttachments([]);
+    setDangerConfirm(false);
+    setDangerNotice("");
     if (selectedId) {
       void patchDeviceState({ selectedSessionId: selectedId }).catch(() => undefined);
     }
@@ -802,12 +805,17 @@ export function App() {
     }
     const enabling = selected.dangerouslyAllowAllTools !== true;
     if (enabling) {
-      const confirmed = window.confirm(
-        "Enable dangerous free mode for this session? ForgeAgent tool approval prompts will be bypassed until you turn it off. Sandbox checks still apply.",
-      );
-      if (!confirmed) return;
+      setDangerConfirm(true);
+      setDangerNotice("");
+      return;
     }
+    await setDangerousMode(false);
+  }
+
+  async function setDangerousMode(enabling: boolean) {
+    if (!selected) return;
     setDangerBusy(true);
+    setDangerConfirm(false);
     setDangerNotice("");
     setError("");
     try {
@@ -972,6 +980,14 @@ export function App() {
           <span>{selectedProject?.name ?? "No project"}</span>
         </div> : null}
       </aside>
+      {!leftCollapsed ? (
+        <button
+          type="button"
+          className="mobile-sidebar-backdrop"
+          aria-label="Close session sidebar"
+          onClick={() => setLeftCollapsed(true)}
+        />
+      ) : null}
 
       <section className="reader">
         <header className="session-strip">
@@ -1032,15 +1048,25 @@ export function App() {
 
         <footer className="composer">
           <div className="composer-toolbar">
-            <button
-              type="button"
-              className="composer-tool-button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={busy || selected?.status === "running"}
+            <label
+              className={`composer-tool-button ${busy || selected?.status === "running" ? "disabled" : ""}`}
               title="Upload files for this session"
+              aria-disabled={busy || selected?.status === "running"}
             >
               Attach
-            </button>
+              <input
+                ref={fileInputRef}
+                className="file-input"
+                type="file"
+                multiple
+                disabled={busy || selected?.status === "running"}
+                onChange={(event) => {
+                  const next = Array.from(event.currentTarget.files ?? []);
+                  setAttachments((current) => [...current, ...next]);
+                  event.currentTarget.value = "";
+                }}
+              />
+            </label>
             <button
               type="button"
               className={`danger-mode-button ${selected?.dangerouslyAllowAllTools ? "active" : ""}`}
@@ -1050,19 +1076,15 @@ export function App() {
             >
               {dangerBusy ? "Updating…" : selected?.dangerouslyAllowAllTools ? "Danger free: on" : "Danger free"}
             </button>
+            {dangerConfirm ? (
+              <span className="danger-confirm">
+                <span>Bypass approvals?</span>
+                <button type="button" onClick={() => void setDangerousMode(true)} disabled={dangerBusy}>Enable</button>
+                <button type="button" onClick={() => setDangerConfirm(false)} disabled={dangerBusy}>Cancel</button>
+              </span>
+            ) : null}
             {dangerNotice ? <span className="danger-mode-notice">{dangerNotice}</span> : null}
             <span className="composer-hint">Enter sends · Shift+Enter newline</span>
-            <input
-              ref={fileInputRef}
-              className="file-input"
-              type="file"
-              multiple
-              onChange={(event) => {
-                const next = Array.from(event.currentTarget.files ?? []);
-                setAttachments((current) => [...current, ...next]);
-                event.currentTarget.value = "";
-              }}
-            />
           </div>
           {attachments.length > 0 ? (
             <div className="attachment-list">

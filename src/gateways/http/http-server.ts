@@ -4,8 +4,9 @@ import {
   type ServerResponse,
   type Server,
 } from "node:http";
-import { networkInterfaces } from "node:os";
+import { hostname, networkInterfaces } from "node:os";
 import {
+  dirname,
   extname,
   join,
   resolve as pathResolve,
@@ -13,9 +14,13 @@ import {
 } from "node:path";
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
+  renameSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { CoreAPI } from "../../core/core-api.js";
 import { HttpGateway } from "./http-gateway.js";
 import { validateSchedule } from "../../core/cron-parser.js";
@@ -88,6 +93,20 @@ type RouteMatch = {
   params: Record<string, string>;
 };
 
+type CoreIdentity = {
+  coreId: string;
+  desktopName: string;
+  app: string;
+  version: string;
+  protocolVersion: number;
+};
+
+type NetworkUrls = {
+  localUrl: string;
+  lanUrls: string[];
+  preferredUrl: string;
+};
+
 type HttpSessionView = Session & {
   latestSeq: number;
   latestAgentResultSeq: number;
@@ -130,7 +149,7 @@ class ForbiddenError extends Error {
 }
 
 function resolveOptions(options?: HttpServerOptions): ResolvedHttpServerOptions {
-  const dataDir = options?.discovery?.dataDir ?? ".forge";
+  const dataDir = options?.discovery?.dataDir ?? (options?.authStore ? dirname(options.authStore.baseDir) : ".forge");
   const resolved: ResolvedHttpServerOptions = {
     authMode: options?.authMode ?? "device",
     authStore: options?.authStore ?? new AuthStore(join(dataDir, "auth")),
@@ -139,7 +158,10 @@ function resolveOptions(options?: HttpServerOptions): ResolvedHttpServerOptions 
     enableUi: options?.enableUi ?? Boolean(options?.uiDir),
     uiDir: pathResolve(options?.uiDir ?? join(process.cwd(), "web", "dist")),
     providerConfigStore: options?.providerConfigStore ?? new ProviderConfigStore(join(dataDir, "config")),
-    discovery: options?.discovery ?? {},
+    discovery: {
+      ...(options?.discovery ?? {}),
+      dataDir,
+    },
   };
   if (options?.applyProviderConfig) resolved.applyProviderConfig = options.applyProviderConfig;
   if (options?.testProviderConfig) resolved.testProviderConfig = options.testProviderConfig;
@@ -355,6 +377,54 @@ function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   });
 }
 
+function atomicWrite(filePath: string, content: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  writeFileSync(tmp, content, "utf-8");
+  renameSync(tmp, filePath);
+}
+
+function readJson<T>(filePath: string): T | null {
+  if (!existsSync(filePath)) return null;
+  try {
+    return JSON.parse(readFileSync(filePath, "utf-8")) as T;
+  } catch {
+    return null;
+  }
+}
+
+function identityPath(options: ResolvedHttpServerOptions): string {
+  return join(options.discovery.dataDir ?? ".forge", "identity.json");
+}
+
+function getCoreIdentity(options: ResolvedHttpServerOptions): CoreIdentity {
+  const filePath = identityPath(options);
+  const existing = readJson<Partial<CoreIdentity>>(filePath);
+  if (
+    typeof existing?.coreId === "string" &&
+    existing.coreId.length > 0 &&
+    typeof existing.desktopName === "string" &&
+    existing.desktopName.length > 0
+  ) {
+    return {
+      coreId: existing.coreId,
+      desktopName: existing.desktopName,
+      app: FORGE_AGENT_APP_NAME,
+      version: FORGE_AGENT_VERSION,
+      protocolVersion: 1,
+    };
+  }
+  const identity: CoreIdentity = {
+    coreId: `forge-core-${randomUUID()}`,
+    desktopName: hostname() || "ForgeAgent Desktop",
+    app: FORGE_AGENT_APP_NAME,
+    version: FORGE_AGENT_VERSION,
+    protocolVersion: 1,
+  };
+  atomicWrite(filePath, JSON.stringify(identity, null, 2));
+  return identity;
+}
+
 function readBodyBuffer(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
   return new Promise((resolvePromise, reject) => {
     const chunks: Buffer[] = [];
@@ -460,6 +530,9 @@ function matchRoute(method: string, reqUrl: string): RouteMatch | null {
 
   if (method === "GET" && segments.length === 1 && s(0) === "health") {
     return { handler: "health", params: {} };
+  }
+  if (method === "GET" && segments.length === 1 && s(0) === "identity") {
+    return { handler: "identity", params: {} };
   }
   if (method === "GET" && segments.length === 1 && s(0) === "discovery") {
     return { handler: "discovery", params: {} };
@@ -1116,6 +1189,7 @@ function isPublicHandler(handler: string): boolean {
   return handler === "authStatus"
     || handler === "pairDevice"
     || handler === "health"
+    || handler === "identity"
     || handler === "discovery"
     || handler === "finishMcpOAuthCallback";
 }
@@ -1196,6 +1270,11 @@ async function handleRoute(
       return;
     }
 
+    case "identity": {
+      sendJson(res, 200, buildIdentityPayload(options), origin);
+      return;
+    }
+
     case "discovery": {
       sendJson(res, 200, buildDiscoveryPayload(api, req, options), origin);
       return;
@@ -1248,7 +1327,10 @@ async function handleRoute(
         name,
         kind: normalizeKind(body.kind),
       });
-      sendJson(res, 201, issued, origin);
+      sendJson(res, 201, {
+        ...issued,
+        ...buildConnectionMetadata(req, options),
+      }, origin);
       return;
     }
 
@@ -2097,6 +2179,7 @@ function buildHealthPayload(
   options: ResolvedHttpServerOptions,
 ): Record<string, unknown> {
   const baseUrl = requestBaseUrl(req);
+  const identity = getCoreIdentity(options);
   const runtime = api.getWebridgeRuntime();
   const webridge = runtime
     ? { enabled: true, ...runtime.getHealth() }
@@ -2105,8 +2188,9 @@ function buildHealthPayload(
         state: "offline",
         message: "ForgeWebridge runtime is not enabled.",
         clients: [],
-      };
+  };
   return {
+    ...identity,
     app: FORGE_AGENT_APP_NAME,
     version: FORGE_AGENT_VERSION,
     status: "ready",
@@ -2122,6 +2206,10 @@ function buildHealthPayload(
     setup: options.providerConfigStore.getStatus(),
     webridge,
   };
+}
+
+function buildIdentityPayload(options: ResolvedHttpServerOptions): Record<string, unknown> {
+  return getCoreIdentity(options);
 }
 
 function buildDiscoveryPayload(
@@ -2163,6 +2251,19 @@ function buildNetworkUrlsPayload(
   req: IncomingMessage,
   options: ResolvedHttpServerOptions,
 ): Record<string, unknown> {
+  const networkUrls = computeNetworkUrls(req, options);
+  const identity = getCoreIdentity(options);
+  return {
+    ...identity,
+    ...networkUrls,
+    networkUrls,
+  };
+}
+
+function computeNetworkUrls(
+  req: IncomingMessage,
+  options: ResolvedHttpServerOptions,
+): NetworkUrls {
   const protocol = typeof req.headers["x-forwarded-proto"] === "string"
     ? req.headers["x-forwarded-proto"].split(",")[0]!.trim()
     : "http";
@@ -2173,6 +2274,18 @@ function buildNetworkUrlsPayload(
     localUrl,
     lanUrls,
     preferredUrl: lanUrls[0] ?? localUrl,
+  };
+}
+
+function buildConnectionMetadata(
+  req: IncomingMessage,
+  options: ResolvedHttpServerOptions,
+): Record<string, unknown> {
+  const networkUrls = computeNetworkUrls(req, options);
+  const identity = getCoreIdentity(options);
+  return {
+    ...identity,
+    networkUrls,
   };
 }
 

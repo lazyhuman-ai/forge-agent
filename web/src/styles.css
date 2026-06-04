@@ -37,7 +37,8 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+label {
   font: inherit;
 }
 
@@ -46,8 +47,12 @@ button {
   background: #fff;
   color: var(--text);
   cursor: pointer;
+  min-width: 0;
+  max-width: 100%;
   min-height: 36px;
   padding: 0 14px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 button:hover:not(:disabled) {
@@ -109,6 +114,10 @@ button:disabled {
   gap: 12px;
   overflow: hidden;
   background: #fbfbfa;
+}
+
+.mobile-sidebar-backdrop {
+  display: none;
 }
 
 .sidebar.collapsed {
@@ -228,6 +237,7 @@ button:disabled {
   padding: 0 8px;
   border-radius: 5px;
   font-size: 12px;
+  white-space: normal;
 }
 
 .sidebar-search {
@@ -565,6 +575,8 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .variant-switcher {
@@ -594,6 +606,7 @@ button:disabled {
   min-width: 28px;
   text-align: center;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .text-action {
@@ -1151,12 +1164,29 @@ button:disabled {
 
 .composer-tool-button,
 .danger-mode-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 28px;
-  height: 28px;
+  height: auto;
+  max-width: 100%;
   padding: 0 10px;
   border-radius: 999px;
+  border: 1px solid var(--line-strong);
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: anywhere;
+  background: var(--panel);
+  cursor: pointer;
+  user-select: none;
+}
+
+.composer-tool-button.disabled {
+  cursor: not-allowed;
+  color: var(--faint);
   background: var(--panel);
 }
 
@@ -1172,21 +1202,45 @@ button:disabled {
   background: #fff3f0;
 }
 
+.danger-confirm {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.danger-confirm button {
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
 .danger-mode-notice {
   color: var(--muted);
   font-size: 12px;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .composer-hint {
   margin-left: auto;
   color: var(--faint);
   font-size: 12px;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .file-input {
-  display: none;
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .attachment-list {
@@ -1265,6 +1319,7 @@ button:disabled {
   background: #37352f;
   border-color: #37352f;
   color: #fff;
+  white-space: normal;
 }
 
 .send-button:hover:not(:disabled) {
@@ -1352,6 +1407,8 @@ button:disabled {
   color: #fff;
   font-size: 10px;
   line-height: 15px;
+  overflow: hidden;
+  text-align: center;
 }
 
 .status-drawer {
@@ -1499,6 +1556,21 @@ button:disabled {
     padding: 14px 12px;
     box-shadow: 18px 0 45px rgba(55, 53, 47, 0.14);
     transition: transform 160ms ease;
+  }
+
+  .mobile-sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0 0 0 min(320px, calc(100vw - 52px));
+    z-index: 30;
+    width: auto;
+    height: auto;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: rgba(55, 53, 47, 0.16);
+    cursor: default;
   }
 
   .sidebar.collapsed {

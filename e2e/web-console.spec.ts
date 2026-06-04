@@ -145,12 +145,13 @@ test.describe("ForgeAgent Web Console", () => {
     await page.reload();
     await page.locator(".session-row", { hasText: title }).locator(".session-select").click();
 
-    page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Danger free" }).click();
+    await expect(page.locator(".danger-confirm", { hasText: "Bypass approvals?" })).toBeVisible();
+    await page.locator(".danger-confirm").getByRole("button", { name: "Enable" }).click();
     await expect(page.getByRole("button", { name: "Danger free: on" })).toBeVisible();
 
     const fileChooserPromise = page.waitForEvent("filechooser");
-    await page.getByRole("button", { name: "Attach" }).click();
+    await page.locator(".composer-tool-button", { hasText: "Attach" }).click();
     const chooser = await fileChooserPromise;
     await chooser.setFiles({
       name: "upload-note.txt",
@@ -298,9 +299,16 @@ test.describe("ForgeAgent Web Console", () => {
     await popup.close();
   });
 
-  test("mobile layout hides the session sidebar without reserving page width", async ({ page }) => {
+  test("mobile layout hides the session sidebar without reserving page width", async ({ page, request }) => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await ensureToken(page);
+    const token = await ensureToken(page);
+    const sessionId = await createSessionReturningId(request, token, `E2E mobile ${Date.now()}`);
+    const stateResponse = await request.patch("/device-state", {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { selectedSessionId: sessionId },
+    });
+    expect(stateResponse.ok()).toBeTruthy();
+    await page.reload();
 
     await expect(page.locator(".app-shell")).toHaveClass(/sidebar-collapsed/);
     let metrics = await layoutMetrics(page);
@@ -310,10 +318,17 @@ test.describe("ForgeAgent Web Console", () => {
 
     await page.getByRole("button", { name: /Expand session sidebar/ }).click();
     await expect(page.locator(".app-shell")).not.toHaveClass(/sidebar-collapsed/);
+    await expect(page.locator(".mobile-sidebar-backdrop")).toBeVisible();
     metrics = await layoutMetrics(page);
     expect(metrics.sidebar.width).toBeGreaterThanOrEqual(280);
     expect(metrics.reader.left).toBe(0);
     expect(metrics.bodyScrollHeight).toBeLessThanOrEqual(metrics.viewportHeight + 1);
+
+    await page.getByRole("button", { name: "Close session sidebar" }).click();
+    await expect(page.locator(".app-shell")).toHaveClass(/sidebar-collapsed/);
+    await expect(page.locator(".mobile-sidebar-backdrop")).toHaveCount(0);
+    await page.getByRole("button", { name: "Danger free" }).click();
+    await expect(page.locator(".danger-confirm", { hasText: "Bypass approvals?" })).toBeVisible();
   });
 
   test("generates an Android pairing QR and deep link from the status rail", async ({ page }) => {

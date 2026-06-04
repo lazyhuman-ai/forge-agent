@@ -63,13 +63,67 @@ struct WebConsoleView: NSViewRepresentable {
             windowFeatures: WKWindowFeatures
         ) -> WKWebView? {
             if let url = navigationAction.request.url {
-                if shouldOpenInsideForgeAgent(url) {
+                if shouldOpenInsideForgeAgent(url) || url.scheme == "blob" {
                     webView.load(URLRequest(url: url))
                     return nil
                 }
                 NSWorkspace.shared.open(url)
             }
             return nil
+        }
+
+        @MainActor
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptAlertPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping @MainActor @Sendable () -> Void
+        ) {
+            let alert = NSAlert()
+            alert.messageText = "ForgeAgent"
+            alert.informativeText = message
+            alert.addButton(withTitle: "OK")
+            present(alert, for: webView) { _ in
+                completionHandler()
+            }
+        }
+
+        @MainActor
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptConfirmPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping @MainActor @Sendable (Bool) -> Void
+        ) {
+            let alert = NSAlert()
+            alert.messageText = "ForgeAgent"
+            alert.informativeText = message
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Cancel")
+            present(alert, for: webView) { response in
+                completionHandler(response == .alertFirstButtonReturn)
+            }
+        }
+
+        @MainActor
+        func webView(
+            _ webView: WKWebView,
+            runJavaScriptTextInputPanelWithPrompt prompt: String,
+            defaultText: String?,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping @MainActor @Sendable (String?) -> Void
+        ) {
+            let alert = NSAlert()
+            alert.messageText = "ForgeAgent"
+            alert.informativeText = prompt
+            let field = NSTextField(string: defaultText ?? "")
+            field.frame = NSRect(x: 0, y: 0, width: 360, height: 24)
+            alert.accessoryView = field
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "Cancel")
+            present(alert, for: webView) { response in
+                completionHandler(response == .alertFirstButtonReturn ? field.stringValue : nil)
+            }
         }
 
         func webView(
@@ -157,6 +211,16 @@ struct WebConsoleView: NSViewRepresentable {
             else { return }
             let script = "window.dispatchEvent(new CustomEvent('forge-native-response', { detail: \(json) }));"
             webView.evaluateJavaScript(script)
+        }
+
+        private func present(_ alert: NSAlert, for webView: WKWebView, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+            if let window = webView.window ?? NSApp.keyWindow {
+                alert.beginSheetModal(for: window) { response in
+                    completion(response)
+                }
+            } else {
+                completion(alert.runModal())
+            }
         }
     }
 }

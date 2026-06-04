@@ -74,7 +74,18 @@ export async function apiFetch<T>(
 
 export async function parseResponse<T>(response: Response): Promise<T> {
   const text = await response.text();
-  const data = text ? JSON.parse(text) as unknown : null;
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text) as unknown;
+    } catch {
+      const snippet = text.replace(/\s+/g, " ").trim().slice(0, 160);
+      throw new ApiError(
+        response.status,
+        `ForgeAgent API returned non-JSON content${snippet ? `: ${snippet}` : "."}`,
+      );
+    }
+  }
   if (!response.ok) {
     const message = data && typeof data === "object" && "error" in data
       ? String((data as { error: unknown }).error)

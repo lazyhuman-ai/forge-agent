@@ -1,7 +1,7 @@
 # ForgeAgent
 
 <p align="center">
-  <img src="assets/forgeagent-hero.png" alt="ForgeAgent DeepSeek-native local AI agent workspace" width="100%" />
+  <img src="assets/forge-agent-img.png" alt="ForgeAgent DeepSeek-native local AI agent workspace" width="100%" />
 </p>
 
 **DeepSeek-native local AI agent workspace for Mac, Chrome, Android, MCP, browser automation, long-context coding, and private multi-device workflows.**

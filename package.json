@@ -35,6 +35,7 @@
     "install-service": "tsx src/cli/forgeagent.ts install-service",
     "uninstall-service": "tsx src/cli/forgeagent.ts uninstall-service",
     "doctor": "tsx src/cli/forgeagent.ts doctor",
+    "extensions": "tsx src/cli/extensions.ts",
     "skills": "tsx src/cli/skills.ts",
     "mcp": "tsx src/cli/mcp.ts",
     "logs": "tsx src/cli/forgeagent.ts logs",
@@ -51,7 +52,8 @@
     "soak:real": "tsx scripts/soak-real.ts",
     "soak:resilience": "tsx scripts/soak-resilience.ts",
     "release:e2e": "tsx scripts/release-e2e.ts",
-    "release:gate": "npm run check && npm run release:e2e",
+    "extensions:e2e": "tsx scripts/extension-e2e.ts",
+    "release:gate": "npm run check && npm run extensions:e2e && npm run release:e2e",
     "test": "vitest run",
     "test:watch": "vitest"
   },

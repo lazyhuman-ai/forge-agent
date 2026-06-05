@@ -91,6 +91,17 @@ import type { SessionUsageSummary, UsageRecord } from "../usage/usage-ledger.js"
 import { McpRuntimeManager } from "../mcp/runtime-manager.js";
 import { ProjectStore } from "../projects/project-store.js";
 import type { CreateProjectInput, Project, ProjectTrustState } from "../projects/project-store.js";
+import { ExtensionManager } from "../extensions/extension-manager.js";
+import { ExtensionRegistryStore, type AddExtensionRegistrySourceInput } from "../extensions/registry-store.js";
+import type {
+  ExtensionCandidate,
+  ExtensionEventRecord,
+  ExtensionInstallInput,
+  ExtensionInstallResult,
+  ExtensionRegistrySource,
+  ExtensionStatus,
+} from "../extensions/types.js";
+import { setExtensionManagerForTools } from "../tools/built-in/extension-shared.js";
 import type {
   McpCatalogEntry,
   McpElicitationPublicRequest,
@@ -334,6 +345,8 @@ export class CoreAPI {
   #projectStore: ProjectStore;
   #webridgeRuntime?: WebridgeRuntime;
   #mcpManager?: McpRuntimeManager;
+  #extensionManager?: ExtensionManager;
+  #extensionRegistryStore?: ExtensionRegistryStore;
 
   constructor(toolRegistry?: ToolRegistry, options?: {
     dataDir?: string;
@@ -450,8 +463,12 @@ export class CoreAPI {
     return await this.initSkillEcosystem().install(input);
   }
 
-  enableSkill(name: string, version?: string): SkillManifest {
-    return this.initSkillEcosystem().enable(name, version);
+  async installExternalSkill(input: Parameters<SkillStore["installExternalPackage"]>[0]): Promise<Awaited<ReturnType<SkillStore["installExternalPackage"]>>> {
+    return this.initSkillEcosystem().installExternalPackage(input);
+  }
+
+  enableSkill(name: string, version?: string, options?: { trustWarnings?: boolean }): SkillManifest {
+    return this.initSkillEcosystem().enable(name, version, options);
   }
 
   disableSkill(name: string, reason?: string): SkillManifest {
@@ -671,8 +688,80 @@ export class CoreAPI {
     return this.initMcpEcosystem().respondElicitation(id, response);
   }
 
+  initExtensionEcosystem(options?: { replace?: boolean }): ExtensionManager {
+    if (this.#extensionManager && !options?.replace) return this.#extensionManager;
+    if (!this.#extensionRegistryStore || options?.replace) {
+      this.#extensionRegistryStore = new ExtensionRegistryStore({
+        rootDir: join(this.#dataDir, "extensions"),
+        nextSeq: () => nextSeq++,
+        now: () => now(),
+      });
+    }
+    const manager = new ExtensionManager({
+      listSkills: (filter) => this.getSkills(filter),
+      getSkillStatus: () => this.getSkillStatus(),
+      listSkillSources: () => this.getSkillSources(),
+      installSkill: (input) => this.installSkill(input),
+      installExternalSkill: (input) => this.installExternalSkill(input),
+      enableSkill: (name, version, options) => this.enableSkill(name, version, options),
+      listMcpServers: () => this.getMcpServers(),
+      listMcpTools: () => this.getMcpTools(),
+      listMcpCatalog: () => this.getMcpCatalog(),
+      addMcpCatalogEntry: (entry) => this.addMcpCatalogEntry(entry),
+      installMcpCatalogEntry: (id) => this.installMcpCatalogEntry(id),
+      addMcpServer: (server) => this.addMcpServer(server),
+      enableMcpServer: (id) => this.enableMcpServer(id),
+      registryStore: this.#extensionRegistryStore,
+    });
+    this.#extensionManager = manager;
+    setExtensionManagerForTools(manager);
+    return manager;
+  }
+
+  getExtensions(): ExtensionStatus {
+    return this.initExtensionEcosystem().getStatus();
+  }
+
+  searchExtensions(options?: { query?: string; link?: string; includeInstalled?: boolean }): ExtensionCandidate[] {
+    return this.initExtensionEcosystem().search(options);
+  }
+
+  installExtension(input: ExtensionInstallInput): Promise<ExtensionInstallResult> {
+    return this.initExtensionEcosystem().install(input);
+  }
+
+  enableExtension(
+    kind: "skill" | "mcp_server" | "bundle",
+    idOrName: string,
+    version?: string,
+    options?: { trustWarnings?: boolean },
+  ): Promise<ExtensionInstallResult> {
+    return this.initExtensionEcosystem().enable(kind, idOrName, version, options);
+  }
+
+  getExtensionSources(): ExtensionRegistrySource[] {
+    return this.initExtensionEcosystem().listRegistrySources();
+  }
+
+  addExtensionSource(input: AddExtensionRegistrySourceInput): ExtensionRegistrySource {
+    return this.initExtensionEcosystem().addRegistrySource(input);
+  }
+
+  removeExtensionSource(id: string): boolean {
+    return this.initExtensionEcosystem().removeRegistrySource(id);
+  }
+
+  refreshExtensionSource(id: string): Promise<ExtensionRegistrySource> {
+    return this.initExtensionEcosystem().refreshRegistrySource(id);
+  }
+
+  getExtensionEvents(afterSeq = 0): ExtensionEventRecord[] {
+    return this.initExtensionEcosystem().getEvents(afterSeq);
+  }
+
   registerBuiltInTools(): void {
     if (!this.#toolRegistry) throw new Error("ToolRegistry not set. Pass one to the constructor first.");
+    this.initExtensionEcosystem();
     registerBuiltInTools(this.#toolRegistry);
   }
 
@@ -1199,6 +1288,7 @@ export class CoreAPI {
     const loopOptions: NonNullable<ConstructorParameters<typeof AgentLoop>[5]> = {
       systemPrompt,
       tools,
+      toolsProvider: () => this.#toolRegistry?.list() ?? [],
       artifactStore: this.#artifactStore,
       signal: controller.signal,
       branchId: activeBranchId,
@@ -1815,9 +1905,12 @@ export class CoreAPI {
   #createPathSandbox(sessionId: string): PathSandbox {
     const session = this.#sessions.get(sessionId);
     const projectRoot = session ? this.#sessionProjectRoot(session) : this.#projectStore.getCurrentProject().path;
+    const readRoots: string[] = [];
+    if (this.#skillStore) readRoots.push(this.#skillStore.rootDir);
     return new PathSandbox({
       projectRoot,
       scratchRoot: join(this.#dataDir, "workspaces", `session_${sessionId}`),
+      ...(readRoots.length > 0 ? { readRoots } : {}),
     });
   }
 

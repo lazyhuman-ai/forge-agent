@@ -106,8 +106,30 @@ export type McpCatalogEntry = {
   url?: string;
   command?: string;
   args?: string[];
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
   sha256?: string;
   trust?: McpTrust;
+  sourceUrl?: string;
+  packageName?: string;
+  packageVersion?: string;
+  auth?: {
+    type: "none" | "api_key" | "oauth";
+    env?: Array<{
+      name: string;
+      prompt?: string;
+      required?: boolean;
+      secret?: boolean;
+      default?: string;
+    }>;
+    provider?: string;
+    scopes?: string[];
+    envVar?: string;
+  };
+  defaultEnabledTools?: string[];
+  postInstall?: string;
+  setupRequired?: boolean;
+  tags?: string[];
 };
 
 export type McpToolProjection = {
@@ -125,4 +147,3 @@ export type McpElicitationPublicRequest = {
   status: "pending";
   expiresAt: string;
 };
-

@@ -1,9 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http, { type IncomingMessage } from "node:http";
 import net from "node:net";
 import { join, resolve } from "node:path";
+import { chromium as playwrightChromium } from "@playwright/test";
 import { CoreAPI } from "../src/core/core-api.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
 import { DeepSeekProvider } from "../src/agent/deepseek-provider.js";
@@ -14,7 +15,7 @@ import { ToolRuntime } from "../src/tools/tool-runtime.js";
 import type { PermissionResponseDecision, ToolRequestSource } from "../src/permissions/tool-policy.js";
 import type { SessionEvent, ToolResult } from "../src/streams/event-types.js";
 import { startHttpGateway, type StartedHttpGateway } from "../src/gateways/http/app.js";
-import { defaultWebridgeExtensionDir } from "../src/cli/webridge-package.js";
+import { defaultWebridgeExtensionDir, ensureWebridgeManifestCompatibility } from "../src/cli/webridge-package.js";
 import { CdpClient, type CdpTransport } from "../src/runtimes/browser/cdp-client.js";
 
 type ScenarioResult = {
@@ -51,6 +52,7 @@ type ChromeHandle = {
   cdpUrl: string;
   port: number;
   profileDir: string;
+  executablePath: string;
   stderr: string[];
 };
 
@@ -503,8 +505,8 @@ async function scenarioRealWebridge(): Promise<{ detail: string; diagnostics: Re
     return await scenarioExistingWebridgeGateway(existingBaseUrl);
   }
 
-  const extensionDir = resolve(process.env.RELEASE_WEBRIDGE_EXTENSION_DIR ?? defaultWebridgeExtensionDir());
-  assert(existsSync(join(extensionDir, "manifest.json")), `ForgeWebridge extension manifest not found: ${extensionDir}`);
+  const extensionSourceDir = resolve(process.env.RELEASE_WEBRIDGE_EXTENSION_DIR ?? defaultWebridgeExtensionDir());
+  assert(existsSync(join(extensionSourceDir, "manifest.json")), `ForgeWebridge extension manifest not found: ${extensionSourceDir}`);
   const port = Number(process.env.RELEASE_WEBRIDGE_PORT ?? await freePort());
   const started = await startHttpGateway({
     host: "127.0.0.1",
@@ -516,11 +518,12 @@ async function scenarioRealWebridge(): Promise<{ detail: string; diagnostics: Re
       authMode: "enabled",
     },
   });
+  const extensionDir = prepareWebridgeExtensionForRelease(extensionSourceDir, started.url);
   const chrome = await startChromeWithExtension("webridge", extensionDir);
   const pageServer = await startLocalPageServer();
 
   try {
-    await seedWebridgeExtension(chrome, extensionDir, started.url);
+    await wakeWebridgeExtension(chrome, extensionDir);
     const runtime = started.api.getWebridgeRuntime();
     assert(runtime, "ForgeWebridge runtime is not registered in gateway");
     try {
@@ -552,6 +555,7 @@ async function scenarioRealWebridge(): Promise<{ detail: string; diagnostics: Re
     return {
       detail: `gateway=${started.url}; chromeDebug=${chrome.cdpUrl}; screenshotChars=${screenshot.length}`,
       diagnostics: {
+        extensionSourceDir,
         extensionDir,
         health: runtime.getHealth(),
       },
@@ -561,6 +565,36 @@ async function scenarioRealWebridge(): Promise<{ detail: string; diagnostics: Re
     await stopChrome(chrome);
     await started.shutdown();
   }
+}
+
+function prepareWebridgeExtensionForRelease(sourceDir: string, baseUrl: string): string {
+  const dest = join(DATA_DIR, "webridge-extension", `${Date.now()}`);
+  rmSync(dest, { recursive: true, force: true });
+  mkdirSync(dest, { recursive: true });
+  cpSync(sourceDir, dest, {
+    recursive: true,
+    force: true,
+    dereference: false,
+    filter: (source) => !source.includes(".DS_Store"),
+  });
+  ensureWebridgeManifestCompatibility(dest);
+  patchWebridgeDefaults(dest, baseUrl);
+  return dest;
+}
+
+function patchWebridgeDefaults(extensionDir: string, baseUrl: string): void {
+  const backgroundPath = join(extensionDir, "background.js");
+  if (!existsSync(backgroundPath)) return;
+  let source = readFileSync(backgroundPath, "utf-8");
+  source = source.replace(
+    /const DEFAULT_BASE_URL = ["'][^"']+["'];/,
+    `const DEFAULT_BASE_URL = ${JSON.stringify(baseUrl)};`,
+  );
+  source = source.replace(
+    "if (current.autoDiscover === undefined) patch.autoDiscover = true;",
+    "if (current.autoDiscover === undefined) patch.autoDiscover = false;",
+  );
+  writeFileSync(backgroundPath, source, "utf-8");
 }
 
 async function existingWebridgeOnline(baseUrl: string): Promise<boolean> {
@@ -714,15 +748,17 @@ async function waitForWebridgeOnline(started: StartedHttpGateway, timeoutMs: num
   throw new Error(`Timed out waiting for ForgeWebridge extension to come online. Health=${JSON.stringify(started.api.getWebridgeRuntime()?.getHealth(), null, 2)}`);
 }
 
-function resolveChromePath(): string {
+function resolveExtensionBrowserPath(): string {
   const candidates = [
+    process.env.RELEASE_WEBRIDGE_BROWSER_PATH,
+    process.env.RELEASE_CHROME_FOR_TESTING_PATH,
+    playwrightChromium.executablePath(),
     process.env.RELEASE_CHROME_PATH,
-    process.env.SOAK_CHROME_PATH,
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     `${process.env.HOME ?? ""}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
   ].filter((candidate): candidate is string => Boolean(candidate));
   const found = candidates.find((candidate) => existsSync(candidate));
-  if (!found) throw new Error("Google Chrome binary not found. Set RELEASE_CHROME_PATH to the Chrome executable path.");
+  if (!found) throw new Error("Extension-capable Chromium/Chrome binary not found. Run npx playwright install chromium or set RELEASE_WEBRIDGE_BROWSER_PATH.");
   return found;
 }
 
@@ -730,9 +766,12 @@ async function startChromeWithExtension(name: string, extensionDir: string): Pro
   const port = Number(process.env.RELEASE_CHROME_DEBUGGING_PORT ?? await freePort());
   const profileDir = join(DATA_DIR, "chrome-profiles", `${name}-${Date.now()}`);
   mkdirSync(profileDir, { recursive: true });
+  const executablePath = resolveExtensionBrowserPath();
   const args = [
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDir}`,
+    "--disable-features=DisableLoadExtensionCommandLineSwitch",
+    "--extensions-on-extension-urls",
     `--load-extension=${extensionDir}`,
     `--disable-extensions-except=${extensionDir}`,
     "--no-first-run",
@@ -740,7 +779,7 @@ async function startChromeWithExtension(name: string, extensionDir: string): Pro
     "--disable-popup-blocking",
     "about:blank",
   ];
-  const child = spawn(resolveChromePath(), args, { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(executablePath, args, { stdio: ["ignore", "pipe", "pipe"] });
   const stderr: string[] = [];
   child.stderr.on("data", (chunk) => {
     stderr.push(chunk.toString("utf-8"));
@@ -748,7 +787,7 @@ async function startChromeWithExtension(name: string, extensionDir: string): Pro
   });
   const cdpUrl = `http://127.0.0.1:${port}`;
   await waitForCdp(cdpUrl, 30_000);
-  return { process: child, cdpUrl, port, profileDir, stderr };
+  return { process: child, cdpUrl, port, profileDir, executablePath, stderr };
 }
 
 async function stopChrome(chrome: ChromeHandle): Promise<void> {
@@ -773,6 +812,17 @@ async function waitForCdp(cdpUrl: string, timeoutMs: number): Promise<void> {
     await sleep(250);
   }
   throw new Error(`Chrome CDP did not become ready at ${cdpUrl}`);
+}
+
+async function wakeWebridgeExtension(chrome: ChromeHandle, extensionDir: string): Promise<void> {
+  const wsUrl = await resolveBrowserWsUrl(chrome.cdpUrl);
+  const transport = await wsTransport(wsUrl);
+  const client = new CdpClient(transport);
+  try {
+    await waitForExtensionServiceWorker(client, extensionDir, 30_000);
+  } finally {
+    client.close();
+  }
 }
 
 async function seedWebridgeExtension(chrome: ChromeHandle, extensionDir: string, baseUrl: string): Promise<void> {
@@ -806,7 +856,25 @@ async function readWebridgeExtensionDiagnostics(chrome: ChromeHandle, extensionD
   const client = new CdpClient(transport);
   try {
     const targets = await client.send("Target.getTargets") as { targetInfos?: Array<{ targetId: string; type: string; url: string; title?: string }> };
-    const targetId = await waitForExtensionServiceWorker(client, extensionDir, 1_000);
+    let targetId = "";
+    let workerError = "";
+    try {
+      targetId = await waitForExtensionServiceWorker(client, extensionDir, 1_000);
+    } catch (err) {
+      workerError = err instanceof Error ? err.message : String(err);
+    }
+    if (!targetId) {
+      return {
+        executablePath: chrome.executablePath,
+        extensionDir,
+        extensionPreferences: readExtensionPreferences(chrome.profileDir),
+        targets: targets.targetInfos?.map((target) => ({ type: target.type, url: target.url, title: target.title })).filter((target) => (
+          target.url.startsWith("chrome-extension://") || target.type === "service_worker"
+        )),
+        workerError,
+        chromeStderrTail: chrome.stderr.slice(-40),
+      };
+    }
     const attach = await client.send("Target.attachToTarget", { targetId, flatten: true }) as { sessionId: string };
     const evaluated = await client.send("Runtime.evaluate", {
       expression: "new Promise((resolve) => chrome.storage.local.get(null, resolve))",
@@ -814,6 +882,9 @@ async function readWebridgeExtensionDiagnostics(chrome: ChromeHandle, extensionD
       returnByValue: true,
     }, attach.sessionId) as { result?: { value?: unknown; description?: string } };
     return {
+      executablePath: chrome.executablePath,
+      extensionDir,
+      extensionPreferences: readExtensionPreferences(chrome.profileDir),
       targets: targets.targetInfos?.map((target) => ({ type: target.type, url: target.url, title: target.title })).filter((target) => (
         target.url.startsWith("chrome-extension://") || target.type === "service_worker"
       )),
@@ -822,6 +893,32 @@ async function readWebridgeExtensionDiagnostics(chrome: ChromeHandle, extensionD
     };
   } finally {
     client.close();
+  }
+}
+
+function readExtensionPreferences(profileDir: string): unknown {
+  try {
+    const preferences = JSON.parse(readFileSync(join(profileDir, "Default", "Preferences"), "utf-8")) as {
+      extensions?: { settings?: Record<string, unknown>; last_chrome_version?: string };
+    };
+    const settings = preferences.extensions?.settings ?? {};
+    return Object.fromEntries(Object.entries(settings).map(([id, value]) => {
+      const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+      const manifest = record.manifest && typeof record.manifest === "object" ? record.manifest as Record<string, unknown> : {};
+      return [id, {
+        path: record.path,
+        state: record.state,
+        location: record.location,
+        disable_reasons: record.disable_reasons,
+        manifest: {
+          name: manifest.name,
+          version: manifest.version,
+          background: manifest.background,
+        },
+      }];
+    }));
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
   }
 }
 

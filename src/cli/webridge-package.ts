@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -52,6 +53,36 @@ export function ensureWebridgeIcons(extensionDir: string): string[] {
   return paths;
 }
 
+export function ensureWebridgeManifestCompatibility(extensionDir: string): string {
+  const manifestPath = join(extensionDir, "manifest.json");
+  if (!existsSync(manifestPath)) {
+    throw new Error(`ForgeWebridge extension manifest not found: ${extensionDir}`);
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as Record<string, unknown>;
+  const permissions = uniqueStringArray(manifest.permissions);
+  const hostPermissions = uniqueStringArray(manifest.host_permissions);
+  let changed = false;
+  if (!permissions.includes("activeTab")) {
+    permissions.push("activeTab");
+    changed = true;
+  }
+  if (!hostPermissions.includes("<all_urls>")) {
+    hostPermissions.push("<all_urls>");
+    changed = true;
+  }
+  if (changed) {
+    manifest.permissions = permissions;
+    manifest.host_permissions = hostPermissions;
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf-8");
+    try {
+      chmodSync(manifestPath, 0o644);
+    } catch {
+      // Some filesystems ignore POSIX modes.
+    }
+  }
+  return manifestPath;
+}
+
 export function packageWebridgeExtension(options?: {
   extensionDir?: string;
   outputDir?: string;
@@ -60,6 +91,7 @@ export function packageWebridgeExtension(options?: {
   if (!existsSync(join(extensionDir, "manifest.json"))) {
     throw new Error(`ForgeWebridge extension manifest not found: ${extensionDir}`);
   }
+  ensureWebridgeManifestCompatibility(extensionDir);
   ensureWebridgeIcons(extensionDir);
 
   const manifest = readWebridgeManifest(extensionDir);
@@ -96,6 +128,13 @@ export function packageWebridgeExtension(options?: {
     manifestPath,
     sha256,
   };
+}
+
+function uniqueStringArray(value: unknown): string[] {
+  const items = Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  return Array.from(new Set(items));
 }
 
 function renderForgePng(size: number): Buffer {

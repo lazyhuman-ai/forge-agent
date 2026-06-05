@@ -25,7 +25,10 @@ export type ToolCapability =
   | "mcp.resource.read"
   | "mcp.prompt.read"
   | "mcp.sampling"
-  | "mcp.elicitation";
+  | "mcp.elicitation"
+  | "extension.read"
+  | "extension.install"
+  | "extension.manage";
 
 export type ToolHandler = (
   args: Record<string, unknown>,

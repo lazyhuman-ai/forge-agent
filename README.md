@@ -134,6 +134,51 @@ npm run mcp -- doctor
 
 项目里的 `.mcp.json` 默认只会被发现，不会自动信任或启用。需要用户确认后才会进入可用工具集。
 
+## 安装 Extensions：skills、tools、MCP 和 bundles
+
+普通用户推荐从 macOS App / Web Console 的 **Extensions** 页面管理扩展。这里是 ForgeAgent 的统一扩展入口，背后是 local-first registry：内置一份随 App 发布的官方/精选 snapshot，也可以添加 GitHub、HTTP JSON 或本地文件 registry source。没有中心化账号或 marketplace 依赖，安装、扫描、lock、audit 都在本机完成。
+
+- 推荐页展示 ForgeAgent 内置的真实 MCP 包、精选 GitHub skills 和 bundles
+- 搜索已安装 skill、MCP catalog、已配置 MCP server、bundle 和配置的 registry source
+- 粘贴 GitHub skill、npm MCP、GitHub MCP 或 bundle 链接后安装
+- Sources 页可添加/刷新/移除静态 registry source；Events 页记录安装、启用、刷新和失败
+- 安装和启用分离：安装只是加入 ForgeAgent，启用会新增运行能力
+- GitHub skill 会按 `SKILL.md` 所在目录安装整个 skill package，包括 `references/`、`scripts/`、`templates/`、`assets/` 等支持文件，不会只抓一个 `SKILL.md`
+- bundle 是组合包，例如一次安装一个 skill 和一个 MCP server；真实权限、沙盒和工具调用仍然走 ForgeAgent 原有机制
+- MCP server 默认安装为 disabled；需要 API key、OAuth 或连接串的 server 会标记为 setup required，配置完成前不会假装可用
+
+也可以直接在对话里自然地说：
+
+```text
+帮我安装 filesystem MCP
+帮我安装这个 GitHub skill：https://github.com/owner/repo/tree/main/skills/my-skill
+安装 code review workspace bundle，然后用它检查当前项目
+找一个适合分析 PDF 的 skill 并安装，找不到就去网上找官方来源
+```
+
+Agent 会优先使用 `extension_search` / `extension_install` / `extension_enable`。如果你给了链接，它会顺着链接识别 GitHub skill package、npm MCP package 或 MCP catalog；如果没给链接，它会先搜索 ForgeAgent catalog，再用可用搜索/浏览工具找官方来源。不要让 Agent 用 `npm install`、`curl | sh` 这类 shell 命令绕过扩展管理，除非扩展工具明确告诉它必须手动安装。
+
+CLI 入口：
+
+```sh
+npm run extensions -- status
+npm run extensions -- search filesystem
+npm run extensions -- install-skill-github https://github.com/owner/repo/tree/main/skills/my-skill
+npm run extensions -- install-bundle code-review-workspace
+npm run extensions -- install-mcp-catalog modelcontextprotocol-filesystem
+npm run extensions -- enable mcp_server filesystem
+npm run extensions -- sources
+npm run extensions -- add-source my-registry --kind http --url https://example.com/forge-extension-registry.json
+npm run extensions -- refresh-source my-registry
+npm run extensions -- doctor
+```
+
+当前内置推荐包括：
+
+- MCP：Filesystem、Everything、Memory、Sequential Thinking、GitHub、Brave Search、Puppeteer、Postgres、PDF、Map、Three.js
+- Skills：Serenity Invest、Code Reviewer、Frontend Design
+- Bundles：Code Review Workspace、Design Reference、Investor Research、PDF Research
+
 ## 数据和安全
 
 - 本地源码运行默认数据目录：`.forge/`

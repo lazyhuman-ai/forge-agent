@@ -101,6 +101,29 @@ describe("SkillStore ecosystem", () => {
     expect(store.formatPrompt()).not.toContain("unsafe-helper");
   });
 
+  it("keeps warning-only local skills usable while surfacing scanner warnings", () => {
+    writeLegacySkill("graphify-like", {
+      name: "graphify-like",
+      description: "Build graph reports from local project inputs",
+    }, [
+      "# Graphify",
+      "",
+      "May mention .env files and credentials as inputs to be handled carefully.",
+      "Install optional helpers with npm install when the user asks for richer graph output.",
+    ].join("\n"));
+
+    const store = new SkillStore({ rootDir: BASE, projectRoot: resolve(".") });
+    const skill = store.list({ includeInactive: true }).find((entry) => entry.name === "graphify-like");
+
+    expect(skill?.status).toBe("active");
+    expect(skill?.scanVerdict).toBe("caution");
+    expect(skill?.scanSummary?.reviewState).toBe("warning");
+    expect(skill?.scanSummary?.findings.map((finding) => finding.ruleId)).toEqual(
+      expect.arrayContaining(["credential-path", "unpinned-install"]),
+    );
+    expect(store.formatPrompt()).toContain("graphify-like");
+  });
+
   it("supports generated overlays, rollback, disable, and re-enable", () => {
     const store = new SkillStore({ rootDir: BASE, projectRoot: resolve(".") });
     const v1 = store.installGeneratedPackage({
@@ -185,5 +208,10 @@ describe("SkillStore ecosystem", () => {
     expect(result.event.action).toBe("quarantined");
     expect(store.list().some((entry) => entry.name === "remote-safe")).toBe(false);
     expect(store.list({ includeInactive: true }).find((entry) => entry.name === "remote-safe")?.status).toBe("quarantined");
+
+    expect(() => store.enable("remote-safe")).toThrow(/Cannot enable remote-safe/);
+    const trusted = store.enable("remote-safe", undefined, { trustWarnings: true });
+    expect(trusted.status).toBe("active");
+    expect(store.list().some((entry) => entry.name === "remote-safe")).toBe(true);
   });
 });

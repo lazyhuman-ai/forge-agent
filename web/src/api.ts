@@ -1,6 +1,10 @@
 import type {
   DeviceState,
   Diagnostics,
+  ExtensionCandidate,
+  ExtensionInstallResult,
+  ExtensionKind,
+  ExtensionStatus,
   HtmlFilePreview,
   McpElicitationRequest,
   McpServerStatus,
@@ -60,6 +64,8 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const token = await ensureDeviceToken();
   const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+  headers.set("X-ForgeAgent-API", "1");
   headers.set("Authorization", `Bearer ${token}`);
   if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -155,6 +161,36 @@ export const api = {
     apiFetch<PermissionRequest>(`/permission-requests/${id}/respond`, {
       method: "POST",
       body: JSON.stringify({ decision }),
+    }),
+  extensions: () => apiFetch<ExtensionStatus>("/extensions"),
+  searchExtensions: (input: { query?: string; link?: string; includeInstalled?: boolean }) => {
+    const params = new URLSearchParams();
+    if (input.query) params.set("query", input.query);
+    if (input.link) params.set("link", input.link);
+    if (input.includeInstalled) params.set("includeInstalled", "true");
+    return apiFetch<{ candidates: ExtensionCandidate[] }>(`/extensions/search?${params.toString()}`);
+  },
+  installExtension: (installInput: Record<string, unknown>) =>
+    apiFetch<ExtensionInstallResult>("/extensions/install", {
+      method: "POST",
+      body: JSON.stringify({ installInput }),
+    }),
+  extensionSources: () => apiFetch<ExtensionStatus["registry"]["sources"]>("/extensions/sources"),
+  addExtensionSource: (input: { kind: "file" | "http" | "github"; name: string; url?: string; path?: string; trustUnsigned?: boolean }) =>
+    apiFetch<ExtensionStatus["registry"]["sources"][number]>("/extensions/sources", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  removeExtensionSource: (sourceId: string) =>
+    apiFetch<{ removed: boolean }>(`/extensions/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }),
+  refreshExtensionSource: (sourceId: string) =>
+    apiFetch<ExtensionStatus["registry"]["sources"][number]>(`/extensions/sources/${encodeURIComponent(sourceId)}/refresh`, { method: "POST" }),
+  extensionEvents: (afterSeq?: number) =>
+    apiFetch<ExtensionStatus["registry"]["events"]>(`/extensions/events${afterSeq ? `?afterSeq=${afterSeq}` : ""}`),
+  enableExtension: (kind: ExtensionKind, idOrName: string, version?: string, options?: { trustWarnings?: boolean }) =>
+    apiFetch<ExtensionInstallResult>("/extensions/enable", {
+      method: "POST",
+      body: JSON.stringify({ kind, idOrName, ...(version ? { version } : {}), ...(options?.trustWarnings !== undefined ? { trustWarnings: options.trustWarnings } : {}) }),
     }),
   mcpServers: () => apiFetch<McpServerStatus[]>("/mcp/servers"),
   mcpTools: () => apiFetch<McpToolMetadata[]>("/mcp/tools"),

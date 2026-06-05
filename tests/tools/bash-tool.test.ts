@@ -27,7 +27,7 @@ describe("bash", () => {
     expect(bashTool.capabilities).toEqual(["process.exec", "fs.read", "fs.write"]);
   });
 
-  it("is denied by ToolRuntime policy before execution when approval is unavailable", async () => {
+  it("runs common low-risk commands without prompting", async () => {
     const registry = new ToolRegistry();
     registry.register(bashTool);
     const runtime = new ToolRuntime(registry);
@@ -42,11 +42,30 @@ describe("bash", () => {
       source: { kind: "trigger", interactive: false },
     });
 
+    expect(result.isError).toBe(false);
+    expect(String(result.output)).toContain("hello");
+  });
+
+  it("is denied by ToolRuntime policy before risky execution when approval is unavailable", async () => {
+    const registry = new ToolRegistry();
+    registry.register(bashTool);
+    const runtime = new ToolRuntime(registry);
+    const broker = new PermissionBroker({
+      nextSeq: () => 1,
+      now: () => new Date(0).toISOString(),
+      appendSessionEvent: () => undefined,
+    });
+
+    const result = await runtime.execute("bash", { command: "npm install left-pad" }, "s1", {
+      permissionBroker: broker,
+      source: { kind: "trigger", interactive: false },
+    });
+
     expect(result.isError).toBe(true);
     expect(String(result.output)).toContain("Tool permission denied before execution.");
     expect(String(result.output)).toContain("Tool: bash");
     expect(String(result.output)).toContain("Requested action: process.exec, fs.read, fs.write");
-    expect(String(result.output)).toContain("Command: echo hello");
+    expect(String(result.output)).toContain("Command: npm install left-pad");
     expect(String(result.output)).toContain("Recovery:");
   });
 

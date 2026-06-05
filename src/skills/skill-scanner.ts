@@ -2,6 +2,8 @@ import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
 import type {
   SkillScanFinding,
+  SkillReviewAction,
+  SkillReviewState,
   SkillScanSeverity,
   SkillScanSummary,
   SkillScanVerdict,
@@ -76,8 +78,8 @@ const RULES: ScanRule[] = [
   },
   {
     ruleId: "credential-path",
-    severity: "critical",
-    message: "References sensitive credential paths.",
+    severity: "warn",
+    message: "Mentions sensitive credential paths. Runtime tools still require permission before reading sensitive files.",
     pattern: /(\$HOME|~)\/\.(ssh|aws|gnupg|kube|docker)|\b\.env\b|\bcredentials\b/i,
   },
   {
@@ -181,11 +183,14 @@ export function scanSkillPackage(
     });
   }
 
+  const verdict = verdictFromFindings(findings);
   return {
     scannedFiles,
     totalBytes,
     findings,
-    verdict: verdictFromFindings(findings),
+    verdict,
+    reviewState: reviewStateFromVerdict(verdict),
+    reviewAction: reviewActionFromVerdict(verdict),
   };
 }
 
@@ -205,10 +210,10 @@ export function shouldEnableSkill(params: {
     return { allow: false, quarantine: verdict !== "dangerous", reason: "Generated skills must pass with a clean static scan before auto-enable." };
   }
   if (verdict === "caution" && params.force) {
-    return { allow: true, quarantine: false, reason: "Caution findings force-enabled by operator." };
+    return { allow: true, quarantine: false, reason: "Warning findings trusted by operator; runtime permissions and sandbox still apply." };
   }
   if (verdict === "caution") {
-    return { allow: false, quarantine: true, reason: "Community/local skill has caution findings and was quarantined." };
+    return { allow: true, quarantine: false, reason: "Static scan found warnings, but no blocking findings. Runtime permissions and sandbox still apply." };
   }
   return { allow: false, quarantine: false, reason: "Dangerous skill findings cannot be enabled." };
 }
@@ -247,6 +252,18 @@ function verdictFromFindings(findings: SkillScanFinding[]): SkillScanVerdict {
   if (findings.some((f) => f.severity === "critical")) return "dangerous";
   if (findings.some((f) => f.severity === "warn")) return "caution";
   return "safe";
+}
+
+function reviewStateFromVerdict(verdict: SkillScanVerdict): SkillReviewState {
+  if (verdict === "dangerous") return "blocked";
+  if (verdict === "caution") return "warning";
+  return "safe";
+}
+
+function reviewActionFromVerdict(verdict: SkillScanVerdict): SkillReviewAction {
+  if (verdict === "dangerous") return "fix_required";
+  if (verdict === "caution") return "trust_enable";
+  return "none";
 }
 
 function isTextPath(filePath: string): boolean {

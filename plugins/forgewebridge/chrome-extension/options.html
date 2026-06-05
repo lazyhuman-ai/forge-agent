@@ -1,0 +1,172 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>ForgeWebridge</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      body {
+        min-width: 360px;
+        margin: 0;
+        padding: 18px;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0;
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        font-weight: 600;
+        margin: 12px 0 5px;
+      }
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 8px;
+      }
+      button {
+        border: 1px solid #8aa8ff;
+        border-radius: 6px;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        margin-top: 12px;
+        padding: 8px 10px;
+      }
+      button.primary {
+        background: #2d6cdf;
+        border-color: #2d6cdf;
+        color: #fff;
+      }
+      button:disabled {
+        cursor: default;
+        opacity: 0.62;
+      }
+      details {
+        margin-top: 14px;
+      }
+      summary {
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .hero {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin: 14px 0 10px;
+      }
+      .dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #999;
+        flex: 0 0 auto;
+      }
+      .dot.connected { background: #23a559; }
+      .dot.waiting { background: #d99a25; }
+      .dot.error { background: #cf3e3e; }
+      .title {
+        font-size: 15px;
+        font-weight: 650;
+      }
+      .message {
+        color: color-mix(in srgb, currentColor 72%, transparent);
+        font-size: 12px;
+        line-height: 1.4;
+        margin-top: 3px;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+      }
+      .actions button {
+        flex: 1;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .row input[type="checkbox"] {
+        width: auto;
+      }
+      .raw {
+        border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+        border-radius: 6px;
+        font-size: 11px;
+        line-height: 1.4;
+        margin-top: 10px;
+        max-height: 150px;
+        overflow: auto;
+        padding: 8px;
+        white-space: pre-wrap;
+      }
+      .muted {
+        opacity: 0.72;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      .pill {
+        border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+        border-radius: 999px;
+        display: inline-block;
+        font-size: 11px;
+        margin-top: 8px;
+        padding: 3px 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ForgeWebridge</h1>
+    <p class="muted">Lets ForgeAgent use this Chrome profile for browser tasks.</p>
+
+    <div class="hero">
+      <div id="statusDot" class="dot"></div>
+      <div>
+        <div id="statusTitle" class="title">Checking connection...</div>
+        <div id="statusMessage" class="message"></div>
+        <div id="versionPill" class="pill"></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="refresh" class="primary">Refresh connection</button>
+      <button id="forget">Disconnect</button>
+    </div>
+    <div class="actions">
+      <button id="diagnostics">Copy diagnostics</button>
+    </div>
+
+    <details>
+      <summary>Advanced</summary>
+
+      <label for="baseUrl">ForgeAgent URL</label>
+      <input id="baseUrl" placeholder="http://127.0.0.1:3000">
+
+      <label for="deviceName">Device name</label>
+      <input id="deviceName" placeholder="Chrome on this Mac">
+
+      <label for="pairCode">Manual pairing code</label>
+      <input id="pairCode" placeholder="Only needed when auto-pair fails">
+
+      <div class="row">
+        <input id="enabled" type="checkbox">
+        <label for="enabled">Enable bridge</label>
+      </div>
+
+      <div class="actions">
+        <button id="pair">Pair with code</button>
+        <button id="save">Save</button>
+      </div>
+
+      <div id="rawStatus" class="raw"></div>
+    </details>
+
+    <script src="options.js"></script>
+  </body>
+</html>

@@ -100,14 +100,8 @@ export type PermissionBrokerOptions = {
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-const ASK_CAPABILITIES = new Set<ToolCapability>([
-  "fs.write",
-  "process.exec",
-  "network.http",
-  "memory.write",
+const HIGH_RISK_CAPABILITIES = new Set<ToolCapability>([
   "scheduler.write",
-  "runtime.browser",
-  "mcp.tool",
   "mcp.server.launch",
   "mcp.sampling",
   "mcp.elicitation",
@@ -121,6 +115,7 @@ const READ_CAPABILITIES = new Set<ToolCapability>([
   "user.prompt",
   "mcp.resource.read",
   "mcp.prompt.read",
+  "extension.read",
 ]);
 
 function capabilityAction(capabilities: ToolCapability[]): string {
@@ -149,6 +144,62 @@ function subjectFromArgs(toolName: string, args: Record<string, unknown>): strin
 
 function pathFromArgs(args: Record<string, unknown>): string | null {
   return firstString(args, ["file_path", "path"]);
+}
+
+function boolFromArgs(args: Record<string, unknown>, key: string): boolean | undefined {
+  return typeof args[key] === "boolean" ? args[key] : undefined;
+}
+
+function installInputFromArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const raw = args.install_input ?? args.installInput;
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : args;
+}
+
+function normalizeCommand(command: string): string {
+  return command.trim().replace(/\s+/g, " ");
+}
+
+function isDangerousShellCommand(command: string): string | null {
+  const normalized = normalizeCommand(command).toLowerCase();
+  const patterns: Array<[RegExp, string]> = [
+    [/\brm\s+-(?:[a-z]*r[a-z]*f|[a-z]*f[a-z]*r)\b/, "recursive force deletion"],
+    [/\bsudo\b/, "privilege escalation"],
+    [/\b(?:chmod|chown)\b/, "permission or ownership changes"],
+    [/\b(?:dd|mkfs|diskutil)\b/, "disk mutation"],
+    [/\b(?:launchctl|security)\b/, "system service or credential access"],
+    [/\b(?:git\s+push|git\s+reset\s+--hard|git\s+clean\s+-[a-z]*f)/, "git history or destructive workspace mutation"],
+    [/\b(?:npm|pnpm|yarn|bun|pip|uv|brew)\s+(?:install|add|remove|uninstall|upgrade|update)\b/, "package installation or removal"],
+    [/\bnpx\b(?!\s+tsc\s+--noemit(?:\s|$))|\bbunx\b|\buvx\b/, "package runner execution"],
+    [/\b(?:curl|wget)\b.*\|\s*(?:sh|bash|zsh|python|node)\b/, "downloaded code execution"],
+    [/\b(?:ssh|scp|rsync)\b/, "remote shell or file transfer"],
+  ];
+  for (const [pattern, reason] of patterns) {
+    if (pattern.test(normalized)) return reason;
+  }
+  return null;
+}
+
+function isCommonSafeShellCommand(command: string): boolean {
+  const normalized = normalizeCommand(command).toLowerCase();
+  if (/^echo\b(?!.*[>|])/.test(normalized)) return true;
+  if (/^(?:pwd|date|whoami|id|uname|hostname)(?:\s|$)/.test(normalized)) return true;
+  if (/^(?:ls|find|fd|rg|grep|cat|head|tail|wc|du|df|file|stat)(?:\s|$)/.test(normalized)) return true;
+  if (/^git\s+(?:status|log|diff|show|branch|tag|remote|rev-parse|ls-files|grep|blame|describe)(?:\s|$)/.test(normalized)) return true;
+  if (/^(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|typecheck|check|build|lint|format))(?:\s|$)/.test(normalized)) return true;
+  if (/^npx\s+tsc\s+--noemit(?:\s|$)/.test(normalized)) return true;
+  return false;
+}
+
+function extensionInstallNeedsApproval(args: Record<string, unknown>): string | null {
+  const input = installInputFromArgs(args);
+  const kind = firstString(input, ["kind"]);
+  const enable = boolFromArgs(input, "enable") === true;
+  if ((kind === "mcp_server" || kind === "mcp_catalog") && enable) {
+    return "Enabling an MCP server can launch a local process or connect to a remote service.";
+  }
+  return null;
 }
 
 function decisionRank(decision: ToolPolicyDecisionKind): number {
@@ -259,12 +310,123 @@ export class ToolPolicyManager {
       }
     }
 
-    if (capabilities.some((capability) => ASK_CAPABILITIES.has(capability))) {
+    if (input.tool.name === "extension_install") {
+      const reason = extensionInstallNeedsApproval(input.args);
+      if (reason) {
+        return {
+          decision: "ask",
+          action,
+          subject,
+          reason,
+        };
+      }
+      return {
+        decision: "allow",
+        action,
+        subject,
+        reason: "Extension installation is allowed by default when it does not immediately enable a risky runtime.",
+      };
+    }
+
+    if (input.tool.name === "extension_enable") {
+      const kind = firstString(input.args, ["kind"]);
+      if (kind === "skill") {
+        return {
+          decision: "allow",
+          action,
+          subject,
+          reason: "Enabling an installed skill is allowed by default; any scripts or tools it suggests still run through normal permissions and sandbox.",
+        };
+      }
       return {
         decision: "ask",
         action,
         subject,
-        reason: "This tool capability requires user approval before execution.",
+        reason: "Enabling this extension can launch or connect runtime capability and should be confirmed.",
+      };
+    }
+
+    if (input.tool.name === "bash") {
+      const command = firstString(input.args, ["command"]) ?? "";
+      const dangerous = isDangerousShellCommand(command);
+      if (dangerous) {
+        return {
+          decision: "ask",
+          action,
+          subject,
+          reason: `This shell command involves ${dangerous}.`,
+        };
+      }
+      if (isCommonSafeShellCommand(command)) {
+        return {
+          decision: "allow",
+          action,
+          subject,
+          reason: "Common read-only, build, or test shell command is allowed by default policy.",
+        };
+      }
+      return {
+        decision: "ask",
+        action,
+        subject,
+        reason: "This shell command is not recognized as a low-risk read/build/test command.",
+      };
+    }
+
+    if (
+      input.tool.isReadOnly === true &&
+      capabilities.every((capability) => READ_CAPABILITIES.has(capability) || capability === "network.http")
+    ) {
+      return {
+        decision: "allow",
+        action,
+        subject,
+        reason: "Read-only tool request is allowed by default policy.",
+      };
+    }
+
+    if (input.tool.name === "write_file" || input.tool.name === "edit_file") {
+      return {
+        decision: "allow",
+        action,
+        subject,
+        reason: "Workspace file edits are allowed by default; PathSandbox still blocks paths outside allowed roots or sensitive files.",
+      };
+    }
+
+    if (capabilities.includes("runtime.browser")) {
+      return {
+        decision: "allow",
+        action,
+        subject,
+        reason: "Visible browser automation is allowed by default. The agent must ask the user before submitting forms, paying, posting, deleting, or changing account settings.",
+      };
+    }
+
+    if (capabilities.includes("memory.write")) {
+      return {
+        decision: "allow",
+        action,
+        subject,
+        reason: "Memory writes are allowed by default and remain visible through memory tools and diagnostics.",
+      };
+    }
+
+    if (capabilities.includes("mcp.tool") && input.tool.isReadOnly !== true) {
+      return {
+        decision: "ask",
+        action,
+        subject,
+        reason: "This MCP tool is not marked read-only by the server.",
+      };
+    }
+
+    if (capabilities.some((capability) => HIGH_RISK_CAPABILITIES.has(capability))) {
+      return {
+        decision: "ask",
+        action,
+        subject,
+        reason: "This request changes persistent automation, launches external capability, or invokes a high-risk MCP feature.",
       };
     }
 

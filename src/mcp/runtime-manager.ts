@@ -110,6 +110,38 @@ function redact(value: string): string {
     .replace(/(sk-[A-Za-z0-9._-]{12,})/g, "[REDACTED]");
 }
 
+function replaceCatalogPlaceholders(
+  record: Record<string, string> | undefined,
+  projectRoot: string,
+): Record<string, string> | undefined {
+  if (record === undefined) return undefined;
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [key, value.replaceAll("{{projectRoot}}", projectRoot)]),
+  );
+}
+
+function firstPlaceholder(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const match = /\{\{([^}]+)\}\}/.exec(value);
+  return match?.[1] ?? null;
+}
+
+function missingConfigPlaceholder(server: McpServerConfig): string | null {
+  for (const value of [server.url, server.command, ...(server.args ?? [])]) {
+    const found = firstPlaceholder(value);
+    if (found) return found;
+  }
+  for (const value of Object.values(server.env ?? {})) {
+    const found = firstPlaceholder(value);
+    if (found) return found;
+  }
+  for (const value of Object.values(server.headers ?? {})) {
+    const found = firstPlaceholder(value);
+    if (found) return found;
+  }
+  return null;
+}
+
 function safePart(value: string): string {
   const normalized = value.trim().replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
   const base = normalized || "server";
@@ -369,15 +401,21 @@ export class McpRuntimeManager {
   async installCatalogEntry(id: string): Promise<McpServerConfig> {
     const entry = this.#store.listCatalog().find((item) => item.id === id);
     if (!entry) throw new Error(`MCP catalog entry not found: ${id}`);
+    const args = entry.args?.map((arg) => arg.replaceAll("{{projectRoot}}", this.#store.projectRoot));
+    const env = replaceCatalogPlaceholders(entry.env, this.#store.projectRoot);
+    const headers = replaceCatalogPlaceholders(entry.headers, this.#store.projectRoot);
+    const url = entry.url?.replaceAll("{{projectRoot}}", this.#store.projectRoot);
     const server = this.addServer({
       name: entry.name,
       enabled: false,
       transport: entry.transport,
       launchMode: "lazy",
       trust: entry.trust ?? "quarantined",
-      ...(entry.url ? { url: entry.url } : {}),
+      ...(url ? { url } : {}),
       ...(entry.command ? { command: entry.command } : {}),
-      ...(entry.args ? { args: entry.args } : {}),
+      ...(args ? { args } : {}),
+      ...(env ? { env } : {}),
+      ...(headers ? { headers } : {}),
       source: "catalog",
     });
     this.#appendMcpEvent({ server, detail: "catalog_changed", message: `MCP catalog entry installed in quarantine: ${entry.name}` });
@@ -465,7 +503,10 @@ export class McpRuntimeManager {
     if (server.trust === "quarantined") throw new Error(`MCP server is quarantined and cannot start until trusted: ${server.name}`);
     this.#validateServerConfig(server);
     const entry = this.#ensureEntry(server);
-    if (entry.state === "connected") return this.#status(server);
+    if (entry.state === "connected") {
+      await this.#refreshServerSurface(entry);
+      return this.#status(server);
+    }
     if (entry.cooldownUntil && Date.now() < entry.cooldownUntil) {
       throw new Error(`MCP server ${server.name} is cooling down after repeated failures.`);
     }
@@ -794,6 +835,14 @@ export class McpRuntimeManager {
 
   #createTransport(server: McpServerConfig, entry: ConnectedServer): Transport {
     let transport: Transport;
+    const missingSetup = missingConfigPlaceholder(server);
+    if (missingSetup) {
+      throw new Error([
+        `MCP server ${server.name} requires setup before it can start.`,
+        `Missing value: ${missingSetup}`,
+        "Recovery: open Extensions, configure the required environment value or connection URL, then retry enabling this MCP server.",
+      ].join(" "));
+    }
     if (server.transport === "stdio") {
       if (!server.command) throw new Error(`MCP stdio server ${server.name} is missing command.`);
       const params: ConstructorParameters<typeof StdioClientTransport>[0] = {
@@ -978,6 +1027,11 @@ export class McpRuntimeManager {
   #projectTools(entry: ConnectedServer): ExecutableToolDefinition[] {
     const server = entry.config;
     const tools: ExecutableToolDefinition[] = [];
+    const reserved = new Set(
+      this.#registry.list()
+        .filter((tool) => tool.source?.kind !== "mcp" || tool.source.serverId !== server.id)
+        .map((tool) => tool.name.toLowerCase()),
+    );
     for (const meta of entry.tools) {
       const capabilities: ToolCapability[] = meta.readOnly ? [] : ["mcp.tool"];
       tools.push({
@@ -998,8 +1052,10 @@ export class McpRuntimeManager {
           return await this.callTool(server.id, meta.originalName, args, sessionId, context);
         },
       });
+      reserved.add(meta.safeName.toLowerCase());
     }
-    tools.push(...this.#utilityTools(server));
+    tools.push(this.#connectTool(server, reserved));
+    tools.push(...this.#utilityTools(server, reserved));
     return tools;
   }
 
@@ -1025,9 +1081,9 @@ export class McpRuntimeManager {
     };
   }
 
-  #connectTool(server: McpServerConfig): ExecutableToolDefinition {
+  #connectTool(server: McpServerConfig, reserved?: Set<string>): ExecutableToolDefinition {
     return {
-      name: buildToolName(server.name, "connect", new Set(this.#registry.list().map((tool) => tool.name.toLowerCase()))),
+      name: buildToolName(server.name, "connect", reserved ?? new Set(this.#registry.list().map((tool) => tool.name.toLowerCase()))),
       description: `Connect or refresh MCP server ${server.name}. Use this if the server's MCP tools are not currently available.`,
       params: {},
       parametersJsonSchema: { type: "object", properties: {} },
@@ -1046,8 +1102,8 @@ export class McpRuntimeManager {
     };
   }
 
-  #utilityTools(server: McpServerConfig): ExecutableToolDefinition[] {
-    const prefixReserved = new Set(this.#registry.list().map((tool) => tool.name.toLowerCase()));
+  #utilityTools(server: McpServerConfig, reserved?: Set<string>): ExecutableToolDefinition[] {
+    const prefixReserved = reserved ?? new Set(this.#registry.list().map((tool) => tool.name.toLowerCase()));
     const mkName = (name: string) => buildToolName(server.name, name, prefixReserved);
     const source = (originalName: string) => ({ kind: "mcp" as const, serverId: server.id, originalName });
     return [

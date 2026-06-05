@@ -44,6 +44,16 @@ export type { PathSandboxOptions, PathSandboxResolveResult, SandboxAccess } from
 export { McpRuntimeManager } from "./mcp/runtime-manager.js";
 export { McpConfigStore } from "./mcp/config-store.js";
 export type * from "./mcp/types.js";
+export { ExtensionManager } from "./extensions/extension-manager.js";
+export { ExtensionRegistryStore, registryDocument } from "./extensions/registry-store.js";
+export {
+  BUILTIN_EXTENSION_REGISTRY,
+  OFFICIAL_EXTENSION_REGISTRY_SCHEMA,
+  CODE_REVIEWER_SKILL_URL,
+  FRONTEND_DESIGN_SKILL_URL,
+  SERENITY_INVEST_SKILL_URL,
+} from "./extensions/official-registry.js";
+export type * from "./extensions/types.js";
 export { BrowserRuntime } from "./runtimes/browser/browser-runtime.js";
 export type { BrowserOptions, LinkInfo } from "./runtimes/browser/browser-runtime.js";
 export { WebridgeRuntime } from "./runtimes/webridge/webridge-runtime.js";
@@ -136,6 +146,7 @@ export { SkillEvolutionManager } from "./skills/skill-evolution-manager.js";
 export { scanSkillPackage, shouldEnableSkill } from "./skills/skill-scanner.js";
 export type * from "./skills/types.js";
 export type {
+  InstallExternalSkillInput,
   InstallSkillInput,
   InstallSkillResult,
 } from "./skills/skill-store.js";

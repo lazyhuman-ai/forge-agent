@@ -41,6 +41,231 @@ const DEFAULT_STATE: StoreState = {
   updatedAt: new Date(0).toISOString(),
 };
 
+const BUILTIN_CATALOG: McpCatalogEntry[] = [
+  {
+    id: "modelcontextprotocol-filesystem",
+    name: "Filesystem",
+    description: "Official MCP filesystem server for reading and editing files inside configured roots.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-filesystem@2026.1.14", "{{projectRoot}}"],
+    trust: "trusted",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
+    packageName: "@modelcontextprotocol/server-filesystem",
+    packageVersion: "2026.1.14",
+    auth: { type: "none" },
+    defaultEnabledTools: ["read_file", "read_text_file", "list_directory", "directory_tree", "search_files"],
+    tags: ["official", "filesystem", "project"],
+  },
+  {
+    id: "modelcontextprotocol-everything",
+    name: "Everything",
+    description: "Official MCP reference server for validating tools, resources, prompts, sampling, and elicitation support.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-everything@2026.1.26"],
+    trust: "trusted",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/everything",
+    packageName: "@modelcontextprotocol/server-everything",
+    packageVersion: "2026.1.26",
+    auth: { type: "none" },
+    tags: ["official", "reference", "testing"],
+  },
+  {
+    id: "modelcontextprotocol-memory",
+    name: "Memory",
+    description: "Official MCP memory server for local knowledge graph style notes and relations.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-memory@2026.1.26"],
+    trust: "trusted",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
+    packageName: "@modelcontextprotocol/server-memory",
+    packageVersion: "2026.1.26",
+    auth: { type: "none" },
+    tags: ["official", "memory", "knowledge"],
+  },
+  {
+    id: "modelcontextprotocol-sequential-thinking",
+    name: "Sequential Thinking",
+    description: "Official MCP sequential-thinking server for explicit multi-step reasoning traces.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-sequential-thinking@2025.12.18"],
+    trust: "trusted",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
+    packageName: "@modelcontextprotocol/server-sequential-thinking",
+    packageVersion: "2025.12.18",
+    auth: { type: "none" },
+    tags: ["official", "reasoning"],
+  },
+  {
+    id: "modelcontextprotocol-github",
+    name: "GitHub",
+    description: "Official MCP GitHub server for repositories, issues, pull requests, and code search.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-github@2025.4.8"],
+    env: { GITHUB_PERSONAL_ACCESS_TOKEN: "{{GITHUB_PERSONAL_ACCESS_TOKEN}}" },
+    trust: "trusted",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
+    packageName: "@modelcontextprotocol/server-github",
+    packageVersion: "2025.4.8",
+    auth: {
+      type: "api_key",
+      env: [
+        {
+          name: "GITHUB_PERSONAL_ACCESS_TOKEN",
+          prompt: "GitHub personal access token with the repository scopes you want ForgeAgent to use.",
+          required: true,
+          secret: true,
+        },
+      ],
+    },
+    setupRequired: true,
+    postInstall: "Set GITHUB_PERSONAL_ACCESS_TOKEN in the MCP server config before enabling.",
+    tags: ["official", "github", "code"],
+  },
+  {
+    id: "brave-search",
+    name: "Brave Search",
+    description: "Community MCP server for Brave Search web results.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-brave-search@0.6.2"],
+    env: { BRAVE_API_KEY: "{{BRAVE_API_KEY}}" },
+    trust: "trusted",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search",
+    packageName: "@modelcontextprotocol/server-brave-search",
+    packageVersion: "0.6.2",
+    auth: {
+      type: "api_key",
+      env: [
+        {
+          name: "BRAVE_API_KEY",
+          prompt: "Brave Search API key.",
+          required: true,
+          secret: true,
+        },
+      ],
+    },
+    setupRequired: true,
+    postInstall: "Set BRAVE_API_KEY before enabling Brave Search MCP.",
+    tags: ["search", "web"],
+  },
+  {
+    id: "modelcontextprotocol-puppeteer",
+    name: "Puppeteer",
+    description: "MCP server for browser automation through Puppeteer.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-puppeteer@2025.5.12"],
+    trust: "trusted",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/puppeteer",
+    packageName: "@modelcontextprotocol/server-puppeteer",
+    packageVersion: "2025.5.12",
+    auth: { type: "none" },
+    tags: ["browser", "automation"],
+  },
+  {
+    id: "modelcontextprotocol-postgres",
+    name: "Postgres",
+    description: "MCP server for querying a Postgres database.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-postgres@0.6.2", "{{POSTGRES_CONNECTION_STRING}}"],
+    trust: "trusted",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/postgres",
+    packageName: "@modelcontextprotocol/server-postgres",
+    packageVersion: "0.6.2",
+    auth: {
+      type: "api_key",
+      env: [
+        {
+          name: "POSTGRES_CONNECTION_STRING",
+          prompt: "Postgres connection string for the database ForgeAgent may inspect.",
+          required: true,
+          secret: true,
+        },
+      ],
+    },
+    setupRequired: true,
+    postInstall: "Replace {{POSTGRES_CONNECTION_STRING}} with a database URL before enabling.",
+    tags: ["database", "postgres"],
+  },
+  {
+    id: "mcp-server-pdf",
+    name: "PDF",
+    description: "MCP server for inspecting PDF content.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-pdf@1.7.3"],
+    trust: "trusted",
+    sourceUrl: "https://www.npmjs.com/package/@modelcontextprotocol/server-pdf",
+    packageName: "@modelcontextprotocol/server-pdf",
+    packageVersion: "1.7.3",
+    auth: { type: "none" },
+    tags: ["pdf", "documents"],
+  },
+  {
+    id: "mcp-server-map",
+    name: "Map",
+    description: "MCP server for map/geospatial workflows.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-map@1.7.3"],
+    trust: "trusted",
+    sourceUrl: "https://www.npmjs.com/package/@modelcontextprotocol/server-map",
+    packageName: "@modelcontextprotocol/server-map",
+    packageVersion: "1.7.3",
+    auth: { type: "none" },
+    tags: ["map", "geo"],
+  },
+  {
+    id: "mcp-server-threejs",
+    name: "Three.js",
+    description: "MCP server for Three.js scene and asset workflows.",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-threejs@1.7.3"],
+    trust: "trusted",
+    sourceUrl: "https://www.npmjs.com/package/@modelcontextprotocol/server-threejs",
+    packageName: "@modelcontextprotocol/server-threejs",
+    packageVersion: "1.7.3",
+    auth: { type: "none" },
+    tags: ["threejs", "3d"],
+  },
+];
+
+function cloneCatalogEntry(entry: McpCatalogEntry): McpCatalogEntry {
+  const cloned: McpCatalogEntry = {
+    id: entry.id,
+    name: entry.name,
+    transport: entry.transport,
+  };
+  if (entry.description !== undefined) cloned.description = entry.description;
+  if (entry.url !== undefined) cloned.url = entry.url;
+  if (entry.command !== undefined) cloned.command = entry.command;
+  if (entry.args !== undefined) cloned.args = [...entry.args];
+  if (entry.env !== undefined) cloned.env = { ...entry.env };
+  if (entry.headers !== undefined) cloned.headers = { ...entry.headers };
+  if (entry.sha256 !== undefined) cloned.sha256 = entry.sha256;
+  if (entry.trust !== undefined) cloned.trust = entry.trust;
+  if (entry.sourceUrl !== undefined) cloned.sourceUrl = entry.sourceUrl;
+  if (entry.packageName !== undefined) cloned.packageName = entry.packageName;
+  if (entry.packageVersion !== undefined) cloned.packageVersion = entry.packageVersion;
+  if (entry.auth !== undefined) cloned.auth = {
+    ...entry.auth,
+    ...(entry.auth.env !== undefined ? { env: entry.auth.env.map((env) => ({ ...env })) } : {}),
+    ...(entry.auth.scopes !== undefined ? { scopes: [...entry.auth.scopes] } : {}),
+  };
+  if (entry.defaultEnabledTools !== undefined) cloned.defaultEnabledTools = [...entry.defaultEnabledTools];
+  if (entry.postInstall !== undefined) cloned.postInstall = entry.postInstall;
+  if (entry.setupRequired !== undefined) cloned.setupRequired = entry.setupRequired;
+  if (entry.tags !== undefined) cloned.tags = [...entry.tags];
+  return cloned;
+}
+
 function atomicWriteJson(filePath: string, value: unknown): void {
   mkdirSync(dirname(filePath), { recursive: true });
   const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
@@ -179,6 +404,10 @@ export class McpConfigStore {
     return join(this.#rootDir, "servers.json");
   }
 
+  get projectRoot(): string {
+    return this.#projectRoot;
+  }
+
   get eventsPath(): string {
     return join(this.#rootDir, "events.jsonl");
   }
@@ -259,7 +488,7 @@ export class McpConfigStore {
   }
 
   listCatalog(): McpCatalogEntry[] {
-    return this.#readState().catalog;
+    return this.#mergedCatalog(this.#readState().catalog);
   }
 
   addCatalogEntry(entry: McpCatalogEntry): McpCatalogEntry {
@@ -323,6 +552,13 @@ export class McpConfigStore {
       catalog: Array.isArray(raw.catalog) ? raw.catalog : [],
       updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : this.#now(),
     };
+  }
+
+  #mergedCatalog(catalog: McpCatalogEntry[]): McpCatalogEntry[] {
+    const byId = new Map<string, McpCatalogEntry>();
+    for (const entry of BUILTIN_CATALOG) byId.set(entry.id, cloneCatalogEntry(entry));
+    for (const entry of catalog) byId.set(entry.id, cloneCatalogEntry(entry));
+    return [...byId.values()];
   }
 
   #writeState(state: StoreState): void {

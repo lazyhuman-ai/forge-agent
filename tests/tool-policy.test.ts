@@ -70,4 +70,104 @@ describe("ToolPolicyManager", () => {
     });
     expect(denied.decision).toBe("deny");
   });
+
+  it("allows workspace write tools by default while sandbox remains responsible for path boundaries", () => {
+    const policy = new ToolPolicyManager();
+    const decision = policy.evaluate({
+      sessionId: "s1",
+      tool: {
+        name: "write_file",
+        description: "Write",
+        params: {},
+        capabilities: ["fs.write"],
+      },
+      args: { file_path: "notes.md", content: "ok" },
+    });
+
+    expect(decision.decision).toBe("allow");
+    expect(decision.reason).toContain("PathSandbox");
+  });
+
+  it("allows safe shell commands but asks for package installation", () => {
+    const policy = new ToolPolicyManager();
+
+    const safe = policy.evaluate({
+      sessionId: "s1",
+      tool,
+      args: { command: "npm run typecheck" },
+    });
+    expect(safe.decision).toBe("allow");
+
+    const risky = policy.evaluate({
+      sessionId: "s1",
+      tool,
+      args: { command: "npm install left-pad" },
+    });
+    expect(risky.decision).toBe("ask");
+    expect(risky.reason).toContain("package installation");
+  });
+
+  it("lets agents install extension packages but asks before enabling runtime capability", () => {
+    const policy = new ToolPolicyManager();
+
+    const skillInstall = policy.evaluate({
+      sessionId: "s1",
+      tool: {
+        name: "extension_install",
+        description: "Install extension",
+        params: {},
+        capabilities: ["extension.install"],
+      },
+      args: { install_input: { kind: "skill", name: "research" } },
+    });
+    expect(skillInstall.decision).toBe("allow");
+
+    const mcpInstallDisabled = policy.evaluate({
+      sessionId: "s1",
+      tool: {
+        name: "extension_install",
+        description: "Install extension",
+        params: {},
+        capabilities: ["extension.install"],
+      },
+      args: { install_input: { kind: "mcp_catalog", catalogId: "filesystem" } },
+    });
+    expect(mcpInstallDisabled.decision).toBe("allow");
+
+    const mcpInstallEnabled = policy.evaluate({
+      sessionId: "s1",
+      tool: {
+        name: "extension_install",
+        description: "Install extension",
+        params: {},
+        capabilities: ["extension.install"],
+      },
+      args: { install_input: { kind: "mcp_catalog", catalogId: "filesystem", enable: true } },
+    });
+    expect(mcpInstallEnabled.decision).toBe("ask");
+
+    const skillEnable = policy.evaluate({
+      sessionId: "s1",
+      tool: {
+        name: "extension_enable",
+        description: "Enable extension",
+        params: {},
+        capabilities: ["extension.manage"],
+      },
+      args: { kind: "skill", id_or_name: "research" },
+    });
+    expect(skillEnable.decision).toBe("allow");
+
+    const enable = policy.evaluate({
+      sessionId: "s1",
+      tool: {
+        name: "extension_enable",
+        description: "Enable extension",
+        params: {},
+        capabilities: ["extension.manage"],
+      },
+      args: { kind: "mcp_server", id_or_name: "filesystem" },
+    });
+    expect(enable.decision).toBe("ask");
+  });
 });

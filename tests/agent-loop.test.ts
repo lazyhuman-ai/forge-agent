@@ -95,6 +95,56 @@ describe("AgentLoop", () => {
     expect(thread[3]!.type).toBe("assistant_message");
   });
 
+  it("refreshes tool definitions between model iterations", async () => {
+    const tools = [{ name: "extension_install", description: "Install", params: {} }];
+    let call = 0;
+    const provider: ModelProvider = {
+      generate: vi.fn().mockImplementation(async (_msgs: ModelMessage[], visibleTools?: Array<{ name: string }>) => {
+        call++;
+        if (call === 1) {
+          expect(visibleTools?.map((toolDef) => toolDef.name)).toEqual(["extension_install"]);
+          return {
+            text: "",
+            finishReason: "tool_calls",
+            toolCalls: [{ id: "tc1", name: "extension_install", args: {} }],
+          } satisfies ModelResponse;
+        }
+        if (call === 2) {
+          expect(visibleTools?.map((toolDef) => toolDef.name)).toContain("mcp__NewServer__echo");
+          return {
+            text: "",
+            finishReason: "tool_calls",
+            toolCalls: [{ id: "tc2", name: "mcp__NewServer__echo", args: { text: "ok" } }],
+          } satisfies ModelResponse;
+        }
+        return { text: "dynamic tool worked", finishReason: "stop" } satisfies ModelResponse;
+      }),
+    };
+    const executor: ToolExecutor = {
+      execute: vi.fn().mockImplementation(async (name: string) => {
+        if (name === "extension_install") {
+          tools.push({ name: "mcp__NewServer__echo", description: "Echo", params: {} });
+          return { toolCallId: "tc1", toolName: name, output: "installed", isError: false };
+        }
+        return { toolCallId: "tc2", toolName: name, output: "echo ok", isError: false };
+      }),
+    };
+    const loop = new AgentLoop(provider, executor, store, nextSeq, now, {
+      toolsProvider: () => tools,
+    });
+
+    store.append(sid, { type: "user_message", seq: 1, timestamp: ts, sessionId: sid, text: "install and use" });
+
+    const result = await loop.runTurn(sid);
+    expect(result.outcome).toBe("turn_finished");
+    expect(executor.execute).toHaveBeenCalledWith(
+      "mcp__NewServer__echo",
+      { text: "ok" },
+      sid,
+      expect.anything(),
+    );
+  });
+
   it("continues after tool execution returns error", async () => {
     const responses: ModelResponse[] = [
       { text: "", finishReason: "tool_calls", toolCalls: [{ id: "tc1", name: "bad_tool", args: {} }] },

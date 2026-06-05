@@ -82,6 +82,40 @@ afterEach(() => {
 });
 
 describe("McpRuntimeManager", () => {
+  it("exposes built-in MCP catalog entries for product discovery", () => {
+    const root = tempRoot("mcp-catalog-");
+    const store = new McpConfigStore({
+      rootDir: join(root, ".forge", "mcp"),
+      projectRoot: root,
+      nextSeq: () => 1,
+      now: () => new Date(0).toISOString(),
+    });
+
+    expect(store.listCatalog()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "modelcontextprotocol-filesystem",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem@2026.1.14", "{{projectRoot}}"],
+        trust: "trusted",
+      }),
+      expect.objectContaining({
+        id: "modelcontextprotocol-everything",
+        command: "npx",
+        trust: "trusted",
+      }),
+    ]));
+  });
+
+  it("resolves built-in catalog projectRoot placeholders when installing", async () => {
+    const root = tempRoot("mcp-catalog-install-");
+    const registry = new ToolRegistry();
+    const manager = createManager(root, registry);
+
+    const server = await manager.installCatalogEntry("modelcontextprotocol-filesystem");
+
+    expect(server.args).toEqual(["-y", "@modelcontextprotocol/server-filesystem@2026.1.14", root]);
+  });
+
   it("discovers project .mcp.json as disabled untrusted project servers", () => {
     const root = tempRoot("mcp-config-");
     writeFileSync(join(root, ".mcp.json"), JSON.stringify({

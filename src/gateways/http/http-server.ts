@@ -44,6 +44,7 @@ import {
   type SetupStatus,
 } from "../../config/provider-config-store.js";
 import type { McpCatalogEntry, McpLaunchMode, McpServerConfig, McpTransportKind, McpTrust } from "../../mcp/types.js";
+import type { ExtensionInstallInput, ExtensionKind } from "../../extensions/types.js";
 
 export type HttpAuthMode = "device" | "disabled";
 
@@ -309,6 +310,39 @@ function serveStaticUi(
     res.end(content);
   }
   return true;
+}
+
+const API_ROUTE_PREFIXES = new Set([
+  "artifacts",
+  "auth",
+  "device-state",
+  "diagnostics",
+  "discovery",
+  "events",
+  "extensions",
+  "files",
+  "health",
+  "identity",
+  "mcp",
+  "network-urls",
+  "permission-requests",
+  "projects",
+  "sessions",
+  "setup",
+  "skill-events",
+  "skill-sources",
+  "skills",
+  "system-events",
+  "webridge",
+]);
+
+function isApiLikeRequest(req: IncomingMessage): boolean {
+  if (req.headers["x-forgeagent-api"] === "1") return true;
+  const accept = String(req.headers.accept ?? "");
+  if (accept.includes("application/json") && !accept.includes("text/html")) return true;
+  const pathname = routeUrl(req).pathname;
+  const first = pathname.split("/").filter(Boolean)[0];
+  return first !== undefined && API_ROUTE_PREFIXES.has(first);
 }
 
 function resolveUiFile(root: string, pathname: string): string | null {
@@ -621,6 +655,35 @@ function matchRoute(method: string, reqUrl: string): RouteMatch | null {
   }
   if (method === "GET" && segments.length === 1 && s(0) === "network-urls") {
     return { handler: "networkUrls", params: {} };
+  }
+  if (segments.length >= 1 && s(0) === "extensions") {
+    if (method === "GET" && segments.length === 1) {
+      return { handler: "getExtensions", params: {} };
+    }
+    if (method === "GET" && segments.length === 2 && s(1) === "search") {
+      return { handler: "searchExtensions", params: {} };
+    }
+    if (method === "GET" && segments.length === 2 && s(1) === "sources") {
+      return { handler: "listExtensionSources", params: {} };
+    }
+    if (method === "POST" && segments.length === 2 && s(1) === "sources") {
+      return { handler: "addExtensionSource", params: {} };
+    }
+    if (method === "DELETE" && segments.length === 3 && s(1) === "sources") {
+      return { handler: "removeExtensionSource", params: { sourceId: s(2)! } };
+    }
+    if (method === "POST" && segments.length === 4 && s(1) === "sources" && s(3) === "refresh") {
+      return { handler: "refreshExtensionSource", params: { sourceId: s(2)! } };
+    }
+    if (method === "GET" && segments.length === 2 && s(1) === "events") {
+      return { handler: "listExtensionEvents", params: {} };
+    }
+    if (method === "POST" && segments.length === 2 && s(1) === "install") {
+      return { handler: "installExtension", params: {} };
+    }
+    if (method === "POST" && segments.length === 2 && s(1) === "enable") {
+      return { handler: "enableExtension", params: {} };
+    }
   }
   if (method === "POST" && segments.length === 3 && s(0) === "permission-requests" && s(2) === "respond") {
     return { handler: "respondPermissionRequest", params: { requestId: s(1)! } };
@@ -1083,11 +1146,102 @@ function buildMcpCatalogEntry(body: Record<string, unknown>): McpCatalogEntry {
   if (typeof body.url === "string") entry.url = body.url;
   if (typeof body.command === "string") entry.command = body.command;
   const args = optionalStringArray(body.args);
+  const env = optionalRecord(body.env);
+  const headers = optionalRecord(body.headers);
   if (args) entry.args = args;
+  if (env) entry.env = env;
+  if (headers) entry.headers = headers;
   if (typeof body.sha256 === "string") entry.sha256 = body.sha256;
   const trust = optionalTrust(body.trust);
   if (trust) entry.trust = trust;
+  if (typeof body.sourceUrl === "string") entry.sourceUrl = body.sourceUrl;
+  if (typeof body.packageName === "string") entry.packageName = body.packageName;
+  if (typeof body.packageVersion === "string") entry.packageVersion = body.packageVersion;
+  if (Array.isArray(body.defaultEnabledTools)) entry.defaultEnabledTools = body.defaultEnabledTools.map(String);
+  if (typeof body.postInstall === "string") entry.postInstall = body.postInstall;
+  if (typeof body.setupRequired === "boolean") entry.setupRequired = body.setupRequired;
+  if (Array.isArray(body.tags)) entry.tags = body.tags.map(String);
   return entry;
+}
+
+function buildExtensionInstallInput(body: Record<string, unknown>): ExtensionInstallInput {
+  const raw = body.installInput && typeof body.installInput === "object" && !Array.isArray(body.installInput)
+    ? body.installInput as Record<string, unknown>
+    : body.install_input && typeof body.install_input === "object" && !Array.isArray(body.install_input)
+      ? body.install_input as Record<string, unknown>
+      : body;
+  const kind = raw.kind;
+  if (kind === "skill") {
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (!name) throw new Error("Missing skill name.");
+    return {
+      kind: "skill",
+      name,
+      ...(typeof raw.version === "string" ? { version: raw.version } : {}),
+      ...(typeof raw.sourceId === "string" ? { sourceId: raw.sourceId } : {}),
+      ...(typeof raw.registryUrl === "string" ? { registryUrl: raw.registryUrl } : {}),
+      ...(typeof raw.trustUnsigned === "boolean" ? { trustUnsigned: raw.trustUnsigned } : {}),
+      ...(typeof raw.force === "boolean" ? { force: raw.force } : {}),
+    };
+  }
+  if (kind === "skill_github") {
+    const url = typeof raw.url === "string" ? raw.url.trim() : "";
+    if (!url) throw new Error("Missing skill GitHub URL.");
+    return {
+      kind: "skill_github",
+      url,
+      ...(typeof raw.name === "string" ? { name: raw.name } : {}),
+      ...(typeof raw.version === "string" ? { version: raw.version } : {}),
+      ...(typeof raw.force === "boolean" ? { force: raw.force } : {}),
+    };
+  }
+  if (kind === "mcp_catalog") {
+    const catalogId = typeof raw.catalogId === "string"
+      ? raw.catalogId.trim()
+      : typeof raw.catalog_id === "string"
+        ? raw.catalog_id.trim()
+        : "";
+    if (!catalogId) throw new Error("Missing MCP catalog id.");
+    return {
+      kind: "mcp_catalog",
+      catalogId,
+      ...(typeof raw.enable === "boolean" ? { enable: raw.enable } : {}),
+    };
+  }
+  if (kind === "mcp_server") {
+    const serverRaw = raw.server && typeof raw.server === "object" && !Array.isArray(raw.server)
+      ? raw.server as Record<string, unknown>
+      : raw;
+    return {
+      kind: "mcp_server",
+      server: buildMcpServerInput(serverRaw),
+      ...(typeof raw.enable === "boolean"
+        ? { enable: raw.enable }
+        : typeof serverRaw.enable === "boolean"
+          ? { enable: serverRaw.enable }
+          : {}),
+    };
+  }
+  if (kind === "bundle") {
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (!name) throw new Error("Missing bundle name.");
+    const items = Array.isArray(raw.items)
+      ? raw.items.map((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("Invalid bundle item.");
+        const parsed = buildExtensionInstallInput(item as Record<string, unknown>);
+        if (parsed.kind === "bundle") throw new Error("Nested bundles are not supported.");
+        return parsed;
+      })
+      : [];
+    if (items.length === 0) throw new Error("Missing bundle items.");
+    return {
+      kind: "bundle",
+      name,
+      items,
+      ...(typeof raw.enable === "boolean" ? { enable: raw.enable } : {}),
+    };
+  }
+  throw new Error("Invalid extension install kind.");
 }
 
 function buildMcpElicitationResponse(body: Record<string, unknown>): { action: "accept" | "decline"; content?: Record<string, string | number | boolean | string[]> } {
@@ -1216,6 +1370,10 @@ export function createHttpServer(
 
     const route = matchRoute(req.method ?? "GET", req.url ?? "/");
     if (!route) {
+      if (isApiLikeRequest(req)) {
+        sendError(res, 404, "Unknown ForgeAgent API route.", origin);
+        return;
+      }
       if ((req.method === "GET" || req.method === "HEAD") && resolved.enableUi) {
         if (serveStaticUi(req, res, resolved, origin)) return;
       }
@@ -1581,6 +1739,119 @@ async function handleRoute(
         sendJson(res, 200, request, origin);
       } catch (err) {
         sendError(res, 404, err instanceof Error ? err.message : String(err), origin);
+      }
+      return;
+    }
+
+    case "getExtensions": {
+      sendJson(res, 200, api.getExtensions(), origin);
+      return;
+    }
+
+    case "searchExtensions": {
+      const url = routeUrl(req);
+      const searchOptions: { query?: string; link?: string; includeInstalled?: boolean } = {
+        includeInstalled: url.searchParams.get("includeInstalled") === "true",
+      };
+      const query = url.searchParams.get("query");
+      const link = url.searchParams.get("link");
+      if (query !== null) searchOptions.query = query;
+      if (link !== null) searchOptions.link = link;
+      sendJson(res, 200, {
+        candidates: api.searchExtensions(searchOptions),
+      }, origin);
+      return;
+    }
+
+    case "listExtensionSources": {
+      sendJson(res, 200, api.getExtensionSources(), origin);
+      return;
+    }
+
+    case "addExtensionSource": {
+      const body = await parseJson(req, options.maxBodyBytes);
+      try {
+        const kind = typeof body.kind === "string" ? body.kind : "";
+        if (kind !== "file" && kind !== "http" && kind !== "github") {
+          sendError(res, 400, "Extension source kind must be file, http, or github.", origin);
+          return;
+        }
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        if (!name) {
+          sendError(res, 400, "Extension source name is required.", origin);
+          return;
+        }
+        sendJson(res, 201, api.addExtensionSource({
+          kind,
+          name,
+          ...(typeof body.url === "string" ? { url: body.url } : {}),
+          ...(typeof body.path === "string" ? { path: body.path } : {}),
+          ...(typeof body.trust === "string" ? { trust: body.trust as never } : {}),
+          ...(typeof body.trustUnsigned === "boolean" ? { trustUnsigned: body.trustUnsigned } : {}),
+          ...(typeof body.enabled === "boolean" ? { enabled: body.enabled } : {}),
+        }), origin);
+      } catch (err) {
+        sendError(res, 400, err instanceof Error ? err.message : String(err), origin);
+      }
+      return;
+    }
+
+    case "removeExtensionSource": {
+      sendJson(res, 200, { removed: api.removeExtensionSource(params.sourceId!) }, origin);
+      return;
+    }
+
+    case "refreshExtensionSource": {
+      try {
+        sendJson(res, 200, await api.refreshExtensionSource(params.sourceId!), origin);
+      } catch (err) {
+        sendError(res, 400, err instanceof Error ? err.message : String(err), origin);
+      }
+      return;
+    }
+
+    case "listExtensionEvents": {
+      const url = routeUrl(req);
+      const afterSeq = Number(url.searchParams.get("afterSeq") ?? 0);
+      sendJson(res, 200, api.getExtensionEvents(Number.isFinite(afterSeq) ? afterSeq : 0), origin);
+      return;
+    }
+
+    case "installExtension": {
+      const body = await parseJson(req, options.maxBodyBytes);
+      try {
+        sendJson(res, 201, await api.installExtension(buildExtensionInstallInput(body)), origin);
+      } catch (err) {
+        sendError(res, 400, err instanceof Error ? err.message : String(err), origin);
+      }
+      return;
+    }
+
+    case "enableExtension": {
+      const body = await parseJson(req, options.maxBodyBytes);
+      const kind = body.kind;
+      const idOrName = typeof body.idOrName === "string"
+        ? body.idOrName
+        : typeof body.id_or_name === "string"
+          ? body.id_or_name
+          : "";
+      if (kind !== "skill" && kind !== "mcp_server" && kind !== "bundle") {
+        sendError(res, 400, "Invalid extension kind.", origin);
+        return;
+      }
+      if (!idOrName) {
+        sendError(res, 400, "Missing idOrName.", origin);
+        return;
+      }
+      try {
+        sendJson(res, 200, await api.enableExtension(
+          kind,
+          idOrName,
+          typeof body.version === "string" ? body.version : undefined,
+          typeof body.trustWarnings === "boolean" ? { trustWarnings: body.trustWarnings } : undefined,
+        ), origin);
+      } catch (err) {
+        sendError(res, 400, err instanceof Error ? err.message : String(err), origin);
       }
       return;
     }

@@ -143,11 +143,15 @@ export type SkillScanFinding = {
 };
 
 export type SkillScanVerdict = "safe" | "caution" | "dangerous";
+export type SkillReviewState = "safe" | "warning" | "blocked";
+export type SkillReviewAction = "none" | "trust_enable" | "fix_required";
 
 export type SkillScanSummary = {
   scannedFiles: number;
   totalBytes: number;
   verdict: SkillScanVerdict;
+  reviewState: SkillReviewState;
+  reviewAction: SkillReviewAction;
   findings: SkillScanFinding[];
 };
 

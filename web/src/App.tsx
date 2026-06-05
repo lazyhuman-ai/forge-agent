@@ -11,6 +11,8 @@ import { nativeNotificationForEvent } from "./notifications";
 import type {
   DeviceState,
   Diagnostics,
+  ExtensionCandidate,
+  ExtensionStatus,
   PermissionRequest,
   Project,
   Session,
@@ -21,6 +23,7 @@ import type {
 } from "./types";
 
 type LoadState = "booting" | "ready" | "error";
+type MainView = "chat" | "extensions";
 type RailPanel = "provider" | "android" | "browser" | "mcp" | "context" | "permissions" | "notifications" | "memory" | "skills";
 
 const LEFT_COLLAPSED_KEY = "forgeagent.web.leftCollapsed";
@@ -134,6 +137,10 @@ export function App() {
   const [selectedBranchId, setSelectedBranchId] = useState("main");
   const [usage, setUsage] = useState<SessionUsageSummary | null>(null);
   const [deviceState, setDeviceState] = useState<DeviceState | null>(null);
+  const [mainView, setMainView] = useState<MainView>("chat");
+  const [extensionStatus, setExtensionStatus] = useState<ExtensionStatus | null>(null);
+  const [extensionCandidates, setExtensionCandidates] = useState<ExtensionCandidate[]>([]);
+  const [extensionsLoading, setExtensionsLoading] = useState(false);
   const [pendingPermissions, setPendingPermissions] = useState<PermissionRequest[]>([]);
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<File[]>([]);
@@ -197,6 +204,19 @@ export function App() {
   useEffect(() => {
     localStorage.setItem(LEFT_COLLAPSED_KEY, leftCollapsed ? "1" : "0");
   }, [leftCollapsed]);
+
+  useEffect(() => {
+    const media = window.matchMedia?.("(max-width: 760px)");
+    if (!media) return undefined;
+
+    const collapseForMobile = () => {
+      if (media.matches) setLeftCollapsed(true);
+    };
+
+    collapseForMobile();
+    media.addEventListener?.("change", collapseForMobile);
+    return () => media.removeEventListener?.("change", collapseForMobile);
+  }, []);
 
   useEffect(() => {
     threadRef.current = thread;
@@ -373,6 +393,12 @@ export function App() {
     setPendingPermissions(permissionsNext);
   }, []);
 
+  const reloadExtensions = useCallback(async () => {
+    const status = await api.extensions();
+    setExtensionStatus(status);
+    return status;
+  }, []);
+
   const loadThread = useCallback(async (sessionId: string, requestedBranchId?: string) => {
     if (!sessionId) {
       setThread([]);
@@ -521,6 +547,32 @@ export function App() {
     });
   }, [renderThread]);
 
+  useEffect(() => {
+    if (mainView !== "extensions") return;
+    let cancelled = false;
+    setExtensionsLoading(true);
+    setError("");
+    void Promise.allSettled([
+      reloadExtensions(),
+      api.searchExtensions({ includeInstalled: true }),
+    ]).then((results) => {
+      if (cancelled) return;
+      const [statusResult, searchResult] = results;
+      if (searchResult.status === "fulfilled") {
+        setExtensionCandidates(searchResult.value.candidates);
+      }
+      const firstError = [statusResult, searchResult].find((result) => result.status === "rejected");
+      if (firstError?.status === "rejected") {
+        setError(firstError.reason instanceof Error ? firstError.reason.message : String(firstError.reason));
+      }
+    }).finally(() => {
+      if (!cancelled) setExtensionsLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mainView, reloadExtensions]);
+
   useLayoutEffect(() => {
     const textarea = draftRef.current;
     if (!textarea) return;
@@ -577,6 +629,7 @@ export function App() {
 
   async function createSession() {
     setBusy(true);
+    setError("");
     try {
       const created = await api.createSession("New session", selectedProjectIdRef.current || undefined);
       await reloadSessions(created.id);
@@ -640,6 +693,7 @@ export function App() {
   }
 
   async function selectSession(sessionId: string) {
+    setMainView("chat");
     selectedIdRef.current = sessionId;
     setSelectedId(sessionId);
     try {
@@ -705,8 +759,6 @@ export function App() {
       setError("Running sessions must be interrupted before deletion.");
       return;
     }
-    const confirmed = window.confirm(`Delete session "${session.title}"? This archives it from the console.`);
-    if (!confirmed) return;
     setBusy(true);
     setError("");
     try {
@@ -730,8 +782,6 @@ export function App() {
 
   async function deleteIdleAndBlockedSessions() {
     if (deletableSessions.length === 0) return;
-    const confirmed = window.confirm(`Delete ${deletableSessions.length} idle or blocked sessions?`);
-    if (!confirmed) return;
     setBusy(true);
     setError("");
     try {
@@ -897,6 +947,13 @@ export function App() {
         >
           {leftCollapsed ? "+" : "+ New Session"}
         </button>
+        <button
+          className={`sidebar-nav-button ${mainView === "extensions" ? "active" : ""}`}
+          onClick={() => setMainView((view) => view === "extensions" ? "chat" : "extensions")}
+          title="Extensions"
+        >
+          {leftCollapsed ? "◇" : "Extensions"}
+        </button>
         {!leftCollapsed ? (
           <>
             <div className="project-switcher">
@@ -990,6 +1047,18 @@ export function App() {
       ) : null}
 
       <section className="reader">
+        {mainView === "extensions" ? (
+          <ExtensionsCenter
+            status={extensionStatus}
+            candidates={extensionCandidates}
+            loading={extensionsLoading}
+            onCandidates={setExtensionCandidates}
+            onReload={reloadExtensions}
+            onError={setError}
+            onOpenChat={() => setMainView("chat")}
+          />
+        ) : (
+        <>
         <header className="session-strip">
           <div className="session-strip-main">
             <SessionStateIndicator session={selected} />
@@ -1048,25 +1117,28 @@ export function App() {
 
         <footer className="composer">
           <div className="composer-toolbar">
-            <label
+            <button
+              type="button"
               className={`composer-tool-button ${busy || selected?.status === "running" ? "disabled" : ""}`}
               title="Upload files for this session"
               aria-disabled={busy || selected?.status === "running"}
+              disabled={busy || selected?.status === "running"}
+              onClick={() => fileInputRef.current?.click()}
             >
               Attach
-              <input
-                ref={fileInputRef}
-                className="file-input"
-                type="file"
-                multiple
-                disabled={busy || selected?.status === "running"}
-                onChange={(event) => {
-                  const next = Array.from(event.currentTarget.files ?? []);
-                  setAttachments((current) => [...current, ...next]);
-                  event.currentTarget.value = "";
-                }}
-              />
-            </label>
+            </button>
+            <input
+              ref={fileInputRef}
+              className="file-input"
+              type="file"
+              multiple
+              disabled={busy || selected?.status === "running"}
+              onChange={(event) => {
+                const next = Array.from(event.currentTarget.files ?? []);
+                setAttachments((current) => [...current, ...next]);
+                event.currentTarget.value = "";
+              }}
+            />
             <button
               type="button"
               className={`danger-mode-button ${selected?.dangerouslyAllowAllTools ? "active" : ""}`}
@@ -1127,6 +1199,8 @@ export function App() {
             </button>
           </div>
         </footer>
+        </>
+        )}
       </section>
 
       <StatusRail
@@ -1222,6 +1296,629 @@ function ProviderSetup(props: {
         {message ? <span>{message}</span> : null}
       </div>
     </section>
+  );
+}
+
+type ExtensionReviewInfo = {
+  title: string;
+  reason: string;
+  location: string;
+  scan: string;
+  nextStep: string;
+  findings: Array<{
+    ruleId: string;
+    severity: string;
+    file: string;
+    line: number;
+    message: string;
+    evidence: string;
+  }>;
+};
+
+function metadataString(candidate: ExtensionCandidate, key: string): string {
+  const value = candidate.metadata?.[key];
+  return typeof value === "string" && value.trim() ? value : "";
+}
+
+function metadataScan(candidate: ExtensionCandidate): {
+  verdict: string;
+  scannedFiles?: number;
+  findings: ExtensionReviewInfo["findings"];
+} | null {
+  const raw = candidate.metadata?.scanSummary;
+  if (!raw || typeof raw !== "object") return null;
+  const scan = raw as {
+    verdict?: unknown;
+    scannedFiles?: unknown;
+    findings?: unknown;
+  };
+  const findings = Array.isArray(scan.findings)
+    ? scan.findings.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const finding = item as Record<string, unknown>;
+      return [{
+        ruleId: typeof finding.ruleId === "string" ? finding.ruleId : "unknown-rule",
+        severity: typeof finding.severity === "string" ? finding.severity : "info",
+        file: typeof finding.file === "string" ? finding.file : ".",
+        line: typeof finding.line === "number" ? finding.line : 1,
+        message: typeof finding.message === "string" ? finding.message : "Review finding.",
+        evidence: typeof finding.evidence === "string" ? finding.evidence : "",
+      }];
+    })
+    : [];
+  const result: {
+    verdict: string;
+    scannedFiles?: number;
+    findings: ExtensionReviewInfo["findings"];
+  } = {
+    verdict: typeof scan.verdict === "string" ? scan.verdict : metadataString(candidate, "scanVerdict") || "unknown",
+    findings,
+  };
+  if (typeof scan.scannedFiles === "number") result.scannedFiles = scan.scannedFiles;
+  return result;
+}
+
+function reviewInfoForExtension(candidate: ExtensionCandidate): ExtensionReviewInfo | null {
+  const scan = metadataScan(candidate);
+  const invalidReason = metadataString(candidate, "invalidReason");
+  const reviewState = candidate.setupRequired ? "setup_required" : candidate.reviewState;
+  const reviewAction = candidate.setupRequired ? "setup_required" : candidate.reviewAction;
+  const location = metadataString(candidate, "manifestPath")
+    || metadataString(candidate, "location")
+    || metadataString(candidate, "directory")
+    || candidate.source
+    || candidate.sourceLabel;
+  const scanText = scan
+    ? `${scan.verdict}${scan.scannedFiles !== undefined ? ` · ${scan.scannedFiles} files scanned` : ""}`
+    : metadataString(candidate, "scanVerdict") || "Not available";
+
+  if (reviewState === "blocked" || candidate.status === "invalid") {
+    return {
+      title: "Blocked until fixed",
+      reason: invalidReason || candidate.riskSummary || "This extension failed validation.",
+      location,
+      scan: scanText,
+      nextStep: "This extension cannot be enabled from the UI. Edit or remove the package, then rescan/reinstall it. Runtime permissions are not a substitute for fixing blocked scanner findings.",
+      findings: scan?.findings ?? [],
+    };
+  }
+
+  if (reviewState === "warning" || candidate.status === "quarantined") {
+    return {
+      title: "Warnings found",
+      reason: invalidReason || candidate.riskSummary || "This extension has scanner warnings but no blocking findings.",
+      location,
+      scan: scanText,
+      nextStep: reviewAction === "trust_enable"
+        ? "If this is the extension you intended to use, trust and enable it here. Any scripts or tools it suggests still go through normal ForgeAgent permissions and sandbox."
+        : "This extension is already enabled; runtime permissions and sandbox still apply when it uses tools.",
+      findings: scan?.findings ?? [],
+    };
+  }
+
+  if (candidate.setupRequired) {
+    return {
+      title: "Setup required before enabling",
+      reason: candidate.postInstall || candidate.riskSummary || "This extension needs local configuration before it can be enabled.",
+      location,
+      scan: scanText === "Not available" ? "Not applicable" : scanText,
+      nextStep: "Configure the required environment variables, tokens, or connection strings, then return here to enable it.",
+      findings: scan?.findings ?? [],
+    };
+  }
+
+  return null;
+}
+
+function reviewText(candidate: ExtensionCandidate, review: ExtensionReviewInfo): string {
+  const findings = review.findings.length > 0
+    ? review.findings.map((finding) => (
+      `- [${finding.severity}] ${finding.ruleId} ${finding.file}:${finding.line} ${finding.message}${finding.evidence ? ` Evidence: ${finding.evidence}` : ""}`
+    )).join("\n")
+    : "- No scanner findings were returned.";
+  return [
+    `${candidate.title} (${candidate.kind})`,
+    `Status: ${candidate.status}`,
+    `Reason: ${review.reason}`,
+    `Location: ${review.location}`,
+    `Scan: ${review.scan}`,
+    `Next step: ${review.nextStep}`,
+    "Findings:",
+    findings,
+  ].join("\n");
+}
+
+function isAttentionCandidate(candidate: ExtensionCandidate): boolean {
+  return candidate.setupRequired === true ||
+    candidate.reviewState === "warning" ||
+    candidate.reviewState === "blocked" ||
+    candidate.reviewState === "setup_required" ||
+    candidate.status === "quarantined" ||
+    candidate.status === "invalid";
+}
+
+function ExtensionReviewPanel(props: {
+  candidate: ExtensionCandidate;
+  review: ExtensionReviewInfo;
+  busy: boolean;
+  onTrustEnable: () => void;
+  onRescan: () => void;
+  onOpenEvents: () => void;
+  onOpenSources: () => void;
+}) {
+  return (
+    <section className="extension-review-panel" aria-label={`Review details for ${props.candidate.title}`}>
+      <div className="extension-review-head">
+        <strong>{props.review.title}</strong>
+        <span>{props.candidate.status}</span>
+      </div>
+      <dl>
+        <div>
+          <dt>Reason</dt>
+          <dd>{props.review.reason}</dd>
+        </div>
+        <div>
+          <dt>Review location</dt>
+          <dd>
+            <span>This card, plus source package:</span>
+            <code>{props.review.location}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>Scan</dt>
+          <dd>{props.review.scan}</dd>
+        </div>
+        <div>
+          <dt>Next step</dt>
+          <dd>{props.review.nextStep}</dd>
+        </div>
+      </dl>
+      {props.review.findings.length > 0 ? (
+        <div className="extension-findings">
+          <strong>Scanner findings</strong>
+          <ul>
+            {props.review.findings.slice(0, 5).map((finding, index) => (
+              <li key={`${finding.ruleId}-${finding.file}-${finding.line}-${index}`}>
+                <span>{finding.severity}</span>
+                <code>{finding.ruleId}</code>
+                <em>{finding.file}:{finding.line}</em>
+                <p>{finding.message}{finding.evidence ? ` Evidence: ${finding.evidence}` : ""}</p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      <div className="extension-review-actions">
+        {props.candidate.reviewAction === "trust_enable" && !props.candidate.enabled ? (
+          <button type="button" className="primary" onClick={props.onTrustEnable} disabled={props.busy}>
+            {props.busy ? "Enabling…" : "Trust and enable"}
+          </button>
+        ) : null}
+        <button type="button" onClick={props.onRescan} disabled={props.busy}>Rescan</button>
+        <button
+          type="button"
+          onClick={() => {
+            void navigator.clipboard?.writeText(reviewText(props.candidate, props.review));
+          }}
+        >
+          Copy review info
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            void navigator.clipboard?.writeText(props.review.location);
+          }}
+        >
+          Copy source path
+        </button>
+        <button type="button" onClick={props.onOpenEvents}>Audit trail</button>
+        <button type="button" onClick={props.onOpenSources}>Sources</button>
+      </div>
+    </section>
+  );
+}
+
+function ExtensionsCenter(props: {
+  status: ExtensionStatus | null;
+  candidates: ExtensionCandidate[];
+  loading: boolean;
+  onCandidates: (items: ExtensionCandidate[]) => void;
+  onReload: () => Promise<ExtensionStatus>;
+  onError: (error: string) => void;
+  onOpenChat: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [link, setLink] = useState("");
+  const [includeInstalled, setIncludeInstalled] = useState(true);
+  const [busyId, setBusyId] = useState("");
+  const [message, setMessage] = useState("");
+  const [tab, setTab] = useState<"recommended" | "all" | "installed" | "review" | "sources" | "events">("recommended");
+  const [sourceName, setSourceName] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [sourceKind, setSourceKind] = useState<"http" | "github" | "file">("http");
+
+  useEffect(() => {
+    if (props.candidates.length > 0) return;
+    if (busyId === "search") return;
+    void api.searchExtensions({ includeInstalled: true }).then((result) => {
+      props.onCandidates(result.candidates);
+    }).catch((err) => {
+      props.onError(err instanceof Error ? err.message : String(err));
+    });
+  }, [busyId, props.candidates.length, props.onCandidates, props.onError]);
+
+  function searchOptions(): { query?: string; link?: string; includeInstalled?: boolean } {
+    const options: { includeInstalled?: boolean; query?: string; link?: string } = { includeInstalled };
+    const trimmedQuery = query.trim();
+    const trimmedLink = link.trim();
+    if (trimmedQuery) options.query = trimmedQuery;
+    if (trimmedLink) options.link = trimmedLink;
+    return options;
+  }
+
+  async function search() {
+    setBusyId("search");
+    setMessage("");
+    props.onError("");
+    props.onCandidates([]);
+    setTab("all");
+    try {
+      const result = await api.searchExtensions(searchOptions());
+      props.onCandidates(result.candidates);
+      setMessage(result.candidates.length === 0 ? "No matching extensions found." : `Found ${result.candidates.length} extension candidate(s).`);
+    } catch (err) {
+      props.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function install(candidate: ExtensionCandidate) {
+    setBusyId(candidate.id);
+    setMessage("");
+    props.onError("");
+    try {
+      const result = await api.installExtension(candidate.installInput);
+      setMessage(result.message);
+      await props.onReload();
+      const refreshed = await api.searchExtensions(searchOptions());
+      props.onCandidates(refreshed.candidates);
+    } catch (err) {
+      props.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function enable(candidate: ExtensionCandidate, options?: { trustWarnings?: boolean }) {
+    setBusyId(candidate.id);
+    setMessage("");
+    props.onError("");
+    try {
+      const idOrName = candidate.kind === "skill"
+        ? candidate.name
+        : candidate.kind === "bundle"
+          ? candidate.name
+          : candidate.source;
+      const version = metadataString(candidate, "version") || undefined;
+      const result = await api.enableExtension(candidate.kind, idOrName, version, options);
+      setMessage(result.message);
+      await props.onReload();
+      const refreshed = await api.searchExtensions(searchOptions());
+      props.onCandidates(refreshed.candidates);
+    } catch (err) {
+      props.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function addSource() {
+    setBusyId("add-source");
+    setMessage("");
+    props.onError("");
+    try {
+      const input: { kind: "http" | "github" | "file"; name: string; url?: string; path?: string } = {
+        kind: sourceKind,
+        name: sourceName.trim(),
+      };
+      if (sourceKind === "file") input.path = sourceUrl.trim();
+      else input.url = sourceUrl.trim();
+      await api.addExtensionSource(input);
+      const refreshed = await props.onReload();
+      props.onCandidates((await api.searchExtensions(searchOptions())).candidates);
+      setSourceName("");
+      setSourceUrl("");
+      setMessage(`Source added. ${refreshed.registry.sources.length} source(s) configured.`);
+    } catch (err) {
+      props.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function refreshSource(sourceId: string) {
+    setBusyId(`source:${sourceId}`);
+    setMessage("");
+    props.onError("");
+    try {
+      const source = await api.refreshExtensionSource(sourceId);
+      await props.onReload();
+      setMessage(source.lastError ? `Refresh failed: ${source.lastError}` : `Source refreshed: ${source.name}`);
+    } catch (err) {
+      props.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function removeSource(sourceId: string) {
+    setBusyId(`source:${sourceId}`);
+    setMessage("");
+    props.onError("");
+    try {
+      await api.removeExtensionSource(sourceId);
+      await props.onReload();
+      setMessage("Source removed.");
+    } catch (err) {
+      props.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  const visibleCandidates = props.candidates.filter((candidate) => {
+    if (tab === "recommended") return candidate.recommended === true || candidate.trust === "official" || candidate.trust === "curated";
+    if (tab === "installed") return candidate.installed;
+    if (tab === "review") return isAttentionCandidate(candidate);
+    return tab === "all";
+  });
+  const attentionCount = props.candidates.filter(isAttentionCandidate).length ||
+    ((props.status?.counts.quarantined ?? 0) + (props.status?.counts.invalid ?? 0));
+
+  return (
+    <div className="extensions-center">
+      <header className="extensions-header">
+        <div>
+          <p className="eyebrow">ForgeAgent Extensions</p>
+          <h1>Skills, MCP tools, and connectors</h1>
+          <p>
+            Install capabilities manually here, or ask ForgeAgent in chat to install a named extension or a link.
+          </p>
+        </div>
+        <button type="button" onClick={props.onOpenChat}>Back to chat</button>
+      </header>
+
+      <section className="extension-summary-grid">
+        <div><span>Installed</span><strong>{props.status?.counts.installed ?? "—"}</strong></div>
+        <div><span>Enabled</span><strong>{props.status?.counts.enabled ?? "—"}</strong></div>
+        <div><span>MCP tools</span><strong>{props.status?.mcp.tools.length ?? "—"}</strong></div>
+        <div><span>Attention</span><strong>{attentionCount}</strong></div>
+      </section>
+
+      <section className="extension-search-panel">
+        <div className="extension-search-row">
+          <label>
+            Search
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="filesystem mcp, github, design skill…"
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void search();
+              }}
+            />
+          </label>
+          <label>
+            Link
+            <input
+              value={link}
+              onChange={(event) => setLink(event.target.value)}
+              placeholder="https://github.com/owner/repo"
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void search();
+              }}
+            />
+          </label>
+          <button type="button" className="primary" disabled={busyId === "search"} onClick={() => void search()}>
+            {busyId === "search" ? "Searching…" : "Search"}
+          </button>
+        </div>
+        <label className="inline-checkbox">
+          <input type="checkbox" checked={includeInstalled} onChange={(event) => setIncludeInstalled(event.target.checked)} />
+          Include installed
+        </label>
+        {message ? <p className="extension-message">{message}</p> : null}
+      </section>
+
+      <nav className="extension-tabs" aria-label="Extension views">
+        {[
+          ["recommended", "Recommended"],
+          ["all", "All"],
+          ["installed", "Installed"],
+          ["review", "Attention"],
+          ["sources", "Sources"],
+          ["events", "Events"],
+        ].map(([id, label]) => (
+          <button
+            type="button"
+            key={id}
+            className={tab === id ? "active" : ""}
+            onClick={() => setTab(id as typeof tab)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {tab === "sources" ? (
+        <section className="extension-results">
+          <article className="extension-card source-editor">
+            <div className="extension-card-main">
+              <div className="extension-title-row">
+                <strong>Add registry source</strong>
+                <span className="extension-pill">local-first</span>
+              </div>
+              <p>Add a file, GitHub raw URL, or static HTTP registry. Remote entries are cached locally before use.</p>
+              <div className="extension-source-form">
+                <select value={sourceKind} onChange={(event) => setSourceKind(event.target.value as "http" | "github" | "file")}>
+                  <option value="http">HTTP JSON</option>
+                  <option value="github">GitHub JSON</option>
+                  <option value="file">Local file</option>
+                </select>
+                <input value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="Source name" />
+                <input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder={sourceKind === "file" ? "/path/to/registry.json" : "https://example.com/registry.json"} />
+              </div>
+            </div>
+            <div className="extension-actions">
+              <button type="button" onClick={() => void addSource()} disabled={Boolean(busyId) || !sourceName.trim() || !sourceUrl.trim()}>
+                {busyId === "add-source" ? "Adding…" : "Add source"}
+              </button>
+            </div>
+          </article>
+          {(props.status?.registry.sources ?? []).map((source) => (
+            <article className={`extension-card ${source.lastError ? "invalid" : "installed"}`} key={source.id}>
+              <div className="extension-card-main">
+                <div className="extension-title-row">
+                  <strong>{source.name}</strong>
+                  <span className={`extension-pill ${source.trust}`}>{source.trust}</span>
+                  <span className="extension-pill">{source.kind}</span>
+                </div>
+                <p>{source.url ?? source.path ?? source.id}</p>
+                {source.lastError ? <p className="extension-risk">{source.lastError}</p> : null}
+                <div className="extension-tags">
+                  <span>{source.enabled ? "enabled" : "disabled"}</span>
+                  {source.lastRefreshAt ? <span>refreshed {new Date(source.lastRefreshAt).toLocaleString()}</span> : null}
+                </div>
+              </div>
+              <div className="extension-actions">
+                {source.kind !== "builtin" ? (
+                  <>
+                    <button type="button" onClick={() => void refreshSource(source.id)} disabled={Boolean(busyId)}>
+                      {busyId === `source:${source.id}` ? "Working…" : "Refresh"}
+                    </button>
+                    <button type="button" onClick={() => void removeSource(source.id)} disabled={Boolean(busyId)}>
+                      Remove
+                    </button>
+                  </>
+                ) : <span className="extension-enabled">Built in</span>}
+              </div>
+            </article>
+          ))}
+        </section>
+      ) : tab === "events" ? (
+        <section className="extension-results">
+          {(props.status?.registry.events ?? []).length === 0 ? (
+            <div className="extension-empty">
+              <h2>No extension events yet.</h2>
+              <p>Installs, source refreshes, failures, and enables will appear here.</p>
+            </div>
+          ) : (props.status?.registry.events ?? []).map((event) => (
+            <article className="extension-card installed" key={event.seq}>
+              <div className="extension-card-main">
+                <div className="extension-title-row">
+                  <strong>{event.detail}</strong>
+                  <span className="extension-pill">seq {event.seq}</span>
+                </div>
+                <p>{event.message}</p>
+                <div className="extension-tags">
+                  <span>{new Date(event.timestamp).toLocaleString()}</span>
+                  {event.kind ? <span>{event.kind}</span> : null}
+                  {event.sourceId ? <span>{event.sourceId}</span> : null}
+                </div>
+              </div>
+            </article>
+          ))}
+        </section>
+      ) : (
+        <section className="extension-results">
+        {tab === "review" ? (
+          <div className="extension-attention-note">
+            <strong>Attention is not an approval queue.</strong>
+            <span>Warnings can be trusted and enabled here. Blocked extensions must be edited or removed because runtime permissions cannot make blocked package content safe.</span>
+          </div>
+        ) : null}
+        {visibleCandidates.length === 0 ? (
+          <div className="extension-empty">
+            <h2>
+              {tab === "recommended"
+                ? props.loading ? "Loading ForgeAgent Library…" : "ForgeAgent Library did not load."
+                : "Start with a search or paste a link."}
+            </h2>
+            <p>
+              {props.loading
+                ? "Fetching the built-in official and curated extension list from the local Core."
+                : tab === "recommended"
+                  ? "No built-in recommendations were returned. Check the error above or refresh the local Core."
+                  : "ForgeAgent will show install inputs, trust state, and risk before anything is enabled."}
+            </p>
+            {tab === "recommended" ? (
+              <button type="button" onClick={() => void search()} disabled={Boolean(busyId)}>
+                {busyId === "search" ? "Loading…" : "Reload library"}
+              </button>
+            ) : null}
+          </div>
+        ) : visibleCandidates.map((candidate) => {
+          const review = reviewInfoForExtension(candidate);
+          return (
+            <article className={`extension-card ${candidate.status} ${review ? "needs-review" : ""}`} key={candidate.id}>
+              <div className="extension-card-main">
+                <div className="extension-title-row">
+                  <strong>{candidate.title}</strong>
+                  <span className={`extension-pill ${candidate.trust}`}>{candidate.trust}</span>
+                  <span className="extension-pill">{candidate.kind}</span>
+                  {candidate.recommended ? <span className="extension-pill recommended">recommended</span> : null}
+                </div>
+                <p>{candidate.description}</p>
+                {candidate.setupRequired ? <p className="extension-setup">Setup required: {candidate.postInstall ?? "configure required values before enabling."}</p> : null}
+                <p className="extension-risk">{candidate.riskSummary}</p>
+                {review ? (
+                  <ExtensionReviewPanel
+                    candidate={candidate}
+                    review={review}
+                    busy={busyId === candidate.id}
+                    onTrustEnable={() => void enable(candidate, { trustWarnings: true })}
+                    onRescan={() => void search()}
+                    onOpenEvents={() => setTab("events")}
+                    onOpenSources={() => setTab("sources")}
+                  />
+                ) : null}
+                <div className="extension-tags">
+                  <span>{candidate.sourceLabel}</span>
+                  <span>{candidate.status}</span>
+                  {candidate.capabilities.slice(0, 6).map((capability) => <span key={capability}>{capability}</span>)}
+                </div>
+              </div>
+              <div className="extension-actions">
+                {!candidate.installed ? (
+                  <button type="button" onClick={() => void install(candidate)} disabled={Boolean(busyId)}>
+                    {busyId === candidate.id ? "Installing…" : "Install"}
+                  </button>
+                ) : candidate.enabled ? (
+                  <span className="extension-enabled">Enabled</span>
+                ) : review && candidate.reviewAction === "trust_enable" ? (
+                  <button type="button" onClick={() => void enable(candidate, { trustWarnings: true })} disabled={Boolean(busyId)}>
+                    {busyId === candidate.id ? "Enabling…" : "Trust and enable"}
+                  </button>
+                ) : review ? (
+                  <>
+                    <span className="extension-review">
+                      {candidate.reviewAction === "setup_required" ? "Setup required" : "Blocked"}
+                    </span>
+                    {tab !== "review" ? <button type="button" onClick={() => setTab("review")}>Attention</button> : null}
+                  </>
+                ) : (
+                  <button type="button" onClick={() => void enable(candidate)} disabled={Boolean(busyId)}>
+                    {busyId === candidate.id ? "Enabling…" : "Enable"}
+                  </button>
+                )}
+              </div>
+            </article>
+          );
+        })}
+        </section>
+      )}
+    </div>
   );
 }
 

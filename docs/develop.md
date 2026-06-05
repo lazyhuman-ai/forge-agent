@@ -141,6 +141,8 @@ Browser tools 已进入正式 built-in 工具层：Agent 可用 `browser_create_
 
 MCP 已作为本地产品级 client runtime 接入：`McpRuntimeManager` 管理 `.forge/mcp/servers.json`、`events.jsonl`、`oauth/`、`cache/` 和 catalog cache，支持 stdio / streamable-http / legacy SSE server。MCP tool 会投影成 Forge `ToolDefinition`，命名 `mcp__<server>__<tool>`，执行仍走 `ToolRuntime -> PermissionBroker -> Artifact -> Thread`；MCP resources/prompts 通过 utility tools 读取，不直接注入 system prompt。项目 `.mcp.json` 默认只发现为 disabled/untrusted，用户 enable 后才导入本机配置。OAuth needs_auth、断连、timeout、JSON-RPC error 和 MCP tool `isError:true` 默认都是 Agent 可读 `tool_result isError=true` 或 `runtime_event(runtimeKind="mcp")`，普通 MCP 失败不 blocked session。MCP sampling 支持但默认关闭，启用时必须经 `mcp.sampling` 权限；elicitation 通过 durable `mcp_elicitation_request/response` 接入 Web/HTTP。管理入口包括 `npm run mcp -- list/add/remove/status/connect/retry/auth/install/doctor/import`、HTTP `/mcp/*` endpoints 和 Web Console 右侧 MCP rail。
 
+Extensions 是 skills / MCP servers / bundles 的统一 local-first 管理层，不是第二套权限系统。`ExtensionRegistryStore` 管理 `.forge/extensions/sources.json`、`registry-cache/`、`lock.json`、`events.jsonl`；事实源是本机 registry snapshot、用户添加的静态 registry source、skill package、MCP config 和 lock/audit。ForgeAgent 内置 registry snapshot 只使用真实来源：上游官方 MCP npm 包可标为 `official`，Forge 精选第三方 skills/bundles 标为 `curated` 或 `community`，不能冒充上游官方。GitHub skill 链接必须按 `SKILL.md` 所在目录安装完整 package（`references/ scripts/ templates/ assets/ tests/ examples`），禁止 raw-only 降级。需要 env/auth 的 MCP catalog entry 安装为 disabled/setupRequired；配置缺失时 runtime 返回可读错误，不进入 blocked。管理入口包括 Web Console Extensions 页面（Recommended / All / Installed / Needs Review / Sources / Events）、HTTP `/extensions/*` endpoints、CLI `npm run extensions -- search/install-bundle/add-source/refresh-source/doctor`，以及 Agent-facing `extension_search / extension_install / extension_enable`。安装 safe/curated skill 默认允许；MCP 进程启动、外网、高风险能力、采样和写入型工具仍走 ToolPolicy/Danger Free/session allow。
+
 长期记忆采用 markdown-first 结构：`.forge/memory/MEMORY.md` 是短 manifest，`topics/<type>/<id>.md` 保存 active memory 正文，`proposals/*.json` 是后台内部 staging，`index.json` 可重建。新 session 不再被动注入同 session 全量记忆；system prompt 只包含 memory 使用规则、active `instruction` memory 和短 manifest。Agent 需要历史事实时主动调用 `memory_search`，再用 `memory_get` 精读。
 
 MemoryManager 是后台维护者：turn 正常完成或进入 `waiting_user` 后，可用当前主 `ModelProvider`、禁用 tools，从本轮 thread 事件提取 proposals；pending proposals 达阈值、startup rehydrate 或显式 `runMemoryMaintenance()` 时 consolidation 到 active markdown memory。后台 extractor/consolidator 失败不做启发式 fallback，也不阻塞前台 session；Core 写入可读 `runtime_event(runtimeKind="memory", detail="degraded")` 和 system event，并按 backoff 重试。显式 memory 工具失败仍作为工具结果交给 Agent。
@@ -264,7 +266,7 @@ SkillStore -> short manifest in system prompt -> Agent read_file(SKILL.md/refere
 - `skill.json + SKILL.md` 是 canonical package；legacy `<name>/SKILL.md` 只做无损兼容索引。
 - 系统提示只注入短 manifest，不注入 skill 正文；不提供 model-facing `skill_load` / `skill_list` / `skill_search` 工具。
 - skill scripts 只是普通文件，必须由 Agent 显式通过工具运行，并继续经过 ToolPolicyManager 和 PathSandbox。
-- 远端 skill 逐文件下载、sha256 校验、签名校验；unsafe/unsigned/caution package 进入 quarantine，不出现在 prompt。
+- 远端 registry skill 逐文件下载、sha256 校验、签名校验；GitHub skill 链接以 `SKILL.md` 所在目录为 package root，安装整个目录（`references/`、`scripts/`、`templates/`、`assets/` 等），优先 per-file tree 下载，遇到 GitHub API rate limit 时 fallback 到 codeload tarball 后只取 package 目录并扫描；unsafe/unsigned/caution package 进入 quarantine，不出现在 prompt。
 - `SkillEvolutionManager` 可以从 thread 后台生成 proposal，经 static scan、no-tools judge 和 eval 后自动启用 generated overlay；失败只写 skill degraded/backoff 事件，不阻塞前台 session。
 
 所以自动机的边界是：

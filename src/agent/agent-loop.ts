@@ -207,6 +207,7 @@ export class AgentLoop {
   #systemPrompt: string;
   #tools: ToolDefinition[];
   #toolDefs: Map<string, ToolDefinition>;
+  #toolsProvider: (() => ToolDefinition[]) | undefined;
   #maxContextTokens: number;
   #autoCompactBuffer: number;
   #compactionKeepRecentTokens: number;
@@ -238,6 +239,7 @@ export class AgentLoop {
     options?: {
       systemPrompt?: string;
       tools?: ToolDefinition[];
+      toolsProvider?: () => ToolDefinition[];
       maxContextTokens?: number;
       contextWindowTokens?: number;
       autoCompactBuffer?: number;
@@ -270,10 +272,9 @@ export class AgentLoop {
     this.#now = now;
     this.#systemPrompt = options?.systemPrompt ?? "";
     this.#tools = options?.tools ?? [];
+    this.#toolsProvider = options?.toolsProvider;
     this.#toolDefs = new Map();
-    for (const t of this.#tools) {
-      this.#toolDefs.set(t.name, t);
-    }
+    this.#refreshTools();
     this.#maxContextTokens = options?.contextWindowTokens
       ?? options?.maxContextTokens
       ?? DEFAULT_MAX_CONTEXT_TOKENS;
@@ -301,6 +302,7 @@ export class AgentLoop {
 
     for (let i = 0; i < MAX_ITERATIONS; i++) {
       throwIfAborted(this.#signal);
+      this.#refreshTools();
       const events = this.#readThread?.(sessionId) ?? this.#threadStore.getThread(sessionId);
       const messages = buildContext(events);
 
@@ -537,6 +539,16 @@ export class AgentLoop {
     }
 
     return { outcome: "tool_failure", message: "Max iterations exceeded" };
+  }
+
+  #refreshTools(): void {
+    if (this.#toolsProvider) {
+      this.#tools = this.#toolsProvider();
+    }
+    this.#toolDefs = new Map();
+    for (const t of this.#tools) {
+      this.#toolDefs.set(t.name, t);
+    }
   }
 
   async #executeTool(

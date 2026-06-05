@@ -265,7 +265,7 @@ async function scenarioPermissionDeniedRecovery(ctx: SoakContext): Promise<strin
   ctx.api.appendUserMessage(
     session.id,
     [
-      "You must call bash with command='echo should-not-run'.",
+      "You must call bash with command='rm -rf /tmp/forgeagent-soak-denied'.",
       "If the tool result says permission denied, do not retry bash.",
       "Instead answer with the exact prefix SOAK_PERMISSION_DENIED_OK and summarize the denial reason.",
     ].join(" "),

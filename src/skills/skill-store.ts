@@ -32,6 +32,7 @@ import type {
   SkillRegistryIndex,
   SkillRegistryPackage,
   SkillRenderContext,
+  SkillReviewState,
   SkillScanSummary,
   SkillSource,
   SkillSourceKind,
@@ -68,6 +69,14 @@ type LoadedSkill = {
   body: string;
 };
 
+type EnableSkillOptions = {
+  trustWarnings?: boolean;
+};
+
+type SkillEventInput = Omit<SkillEventRecord, "type" | "seq" | "timestamp" | "sessionId" | "action"> & {
+  sessionId?: string;
+};
+
 export type SkillStoreOptions = {
   rootDir?: string;
   projectRoot?: string;
@@ -91,6 +100,17 @@ export type InstallSkillResult = {
   skill: SkillManifest;
   scan: SkillScanSummary;
   event: SkillEventRecord;
+};
+
+export type InstallExternalSkillInput = {
+  name?: string;
+  version?: string;
+  skillMd: string;
+  skillJson?: Partial<SkillPackageManifest>;
+  supportFiles?: Array<{ path: string; content: string | Uint8Array }>;
+  sourceUrl: string;
+  trust?: SkillTrust;
+  force?: boolean;
 };
 
 export class SkillStore {
@@ -340,27 +360,139 @@ export class SkillStore {
     }
   }
 
-  enable(name: string, version?: string): SkillManifest {
+  installExternalPackage(input: InstallExternalSkillInput): InstallSkillResult {
+    const tempDir = join(this.rootDir, "quarantine", `external-skill-${randomUUID()}`);
+    mkdirSync(tempDir, { recursive: true });
+    try {
+      atomicWrite(join(tempDir, "SKILL.md"), input.skillMd);
+      const manifestPatch: Partial<SkillPackageManifest> = {
+        ...(input.skillJson ?? {}),
+        ...(input.name ? { name: input.name } : {}),
+        ...(input.version ? { version: input.version } : {}),
+        trust: input.trust ?? input.skillJson?.trust ?? "community",
+        source: "community",
+      };
+      if (Object.keys(manifestPatch).length > 0) {
+        atomicWriteJson(join(tempDir, "skill.json"), manifestPatch);
+      }
+      for (const file of input.supportFiles ?? []) {
+        const rel = normalizeSkillPath(file.path);
+        if (rel === "SKILL.md" || rel === "skill.json") continue;
+        const target = join(tempDir, rel);
+        mkdirSync(dirname(target), { recursive: true });
+        atomicWriteBytes(target, file.content);
+      }
+
+      const sourceId = `external-${createHash("sha256").update(input.sourceUrl).digest("hex").slice(0, 12)}`;
+      const loaded = this.#loadPackage(tempDir, {
+        sourceId,
+        source: "community",
+        trust: input.trust ?? input.skillJson?.trust ?? "community",
+        packageId: packageId(input.name ?? "external-skill", input.version ?? "0.0.0", "installed"),
+      });
+      const scan = scanSkillPackage(tempDir);
+      const decisionInput: Parameters<typeof shouldEnableSkill>[0] = {
+        trust: loaded.manifest.trust,
+        scan,
+      };
+      if (input.force !== undefined) decisionInput.force = input.force;
+      const decision = shouldEnableSkill(decisionInput);
+      loaded.manifest.scanVerdict = scan.verdict;
+      loaded.manifest.scanSummary = scan;
+
+      if (!decision.allow) {
+        loaded.manifest.status = decision.quarantine ? "quarantined" : "invalid";
+        loaded.manifest.invalidReason = decision.reason;
+        if (decision.quarantine) {
+          const installDir = join(this.rootDir, "installed", loaded.manifest.name, loaded.manifest.version);
+          rmSync(installDir, { recursive: true, force: true });
+          mkdirSync(dirname(installDir), { recursive: true });
+          renameSync(tempDir, installDir);
+          loaded.manifest.location = join(installDir, "SKILL.md");
+          loaded.manifest.directory = installDir;
+        }
+        this.#state.packageStatus[loaded.manifest.packageId] = {
+          status: loaded.manifest.status,
+          reason: decision.reason,
+          updatedAt: this.#now(),
+        };
+        this.#saveState();
+        const event = this.#appendEvent(decision.quarantine ? "quarantined" : "rejected", {
+          skillName: loaded.manifest.name,
+          packageId: loaded.manifest.packageId,
+          status: loaded.manifest.status,
+          trust: loaded.manifest.trust,
+          source: loaded.manifest.source,
+          message: `External skill ${loaded.manifest.name} ${loaded.manifest.version} was not enabled: ${decision.reason}`,
+          payload: { sourceUrl: input.sourceUrl, scan },
+        });
+        this.#appendAudit(event);
+        this.rebuildIndex();
+        return { skill: loaded.manifest, scan, event };
+      }
+
+      const installDir = join(this.rootDir, "installed", loaded.manifest.name, loaded.manifest.version);
+      rmSync(installDir, { recursive: true, force: true });
+      mkdirSync(dirname(installDir), { recursive: true });
+      renameSync(tempDir, installDir);
+      const installed = this.#loadPackage(installDir, {
+        sourceId,
+        source: "community",
+        trust: loaded.manifest.trust,
+        packageId: loaded.manifest.packageId,
+      }).manifest;
+      installed.scanVerdict = scan.verdict;
+      installed.scanSummary = scan;
+      this.#activate(installed, "installed");
+      this.rebuildIndex();
+      const event = this.#appendEvent("installed", {
+        skillName: installed.name,
+        packageId: installed.packageId,
+        status: "active",
+        trust: installed.trust,
+        source: installed.source,
+        message: `External skill installed and enabled: ${installed.name} ${installed.version}`,
+        payload: { sourceUrl: input.sourceUrl, scan },
+      });
+      this.#appendAudit(event);
+      return { skill: installed, scan, event };
+    } finally {
+      if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  enable(name: string, version?: string, options?: EnableSkillOptions): SkillManifest {
     const candidates = this.#entries
       .filter((entry) => entry.name === name && (!version || entry.version === version))
       .sort((a, b) => b.version.localeCompare(a.version));
     const selected = candidates[0];
     if (!selected) throw new Error(`Skill not found: ${name}${version ? ` ${version}` : ""}`);
     if (selected.status === "invalid" || selected.status === "quarantined") {
-      throw new Error(`Cannot enable ${name}: ${selected.invalidReason ?? selected.status}`);
+      const reviewState = selected.scanSummary?.reviewState
+        ?? reviewStateFromLegacyVerdict(selected.scanVerdict);
+      const canTrust = selected.status === "quarantined"
+        ? reviewState !== "blocked"
+        : reviewState === "warning";
+      if (!canTrust || options?.trustWarnings !== true) {
+        throw new Error(`Cannot enable ${name}: ${selected.invalidReason ?? selected.status}`);
+      }
     }
     this.#activate(selected, "enabled");
     delete this.#state.disabled[name];
     this.#saveState();
     this.rebuildIndex();
-    const event = this.#appendEvent("enabled", {
+    const eventInput: SkillEventInput = {
       skillName: selected.name,
       packageId: selected.packageId,
       status: "active",
       trust: selected.trust,
       source: selected.source,
-      message: `Skill enabled: ${selected.name} ${selected.version}`,
-    });
+      message: selected.scanSummary?.reviewState === "warning"
+        ? `Skill enabled with scanner warnings trusted: ${selected.name} ${selected.version}`
+        : `Skill enabled: ${selected.name} ${selected.version}`,
+    };
+    if (selected.scanSummary?.reviewState === "warning") eventInput.payload = { scan: selected.scanSummary };
+    const event = this.#appendEvent("enabled", eventInput);
     this.#appendAudit(event);
     return this.get(name) ?? selected;
   }
@@ -758,6 +890,12 @@ export class SkillStore {
           loaded.manifest.status = decision.quarantine ? "quarantined" : "invalid";
           loaded.manifest.invalidReason = decision.reason;
         }
+      } else if (
+        (loaded.manifest.status === "invalid" || loaded.manifest.status === "quarantined") &&
+        scan.reviewState === "warning"
+      ) {
+        loaded.manifest.status = "disabled";
+        loaded.manifest.invalidReason = "Static scan found warnings. You can trust and enable this skill; runtime permissions and sandbox still apply.";
       }
       return loaded;
     } catch (err) {
@@ -1126,7 +1264,7 @@ function parseScalar(value: string): unknown {
 }
 
 function listSupportFiles(directory: string): string[] {
-  const roots = ["references", "scripts", "templates", "assets", "tests"];
+  const roots = ["references", "scripts", "templates", "assets", "tests", "examples"];
   const files: string[] = [];
   for (const root of roots) {
     const dir = join(directory, root);
@@ -1155,6 +1293,13 @@ function statusRank(status: SkillStatus): number {
     case "invalid": return 3;
     case "archived": return 4;
   }
+}
+
+function reviewStateFromLegacyVerdict(verdict: SkillManifest["scanVerdict"]): SkillReviewState | undefined {
+  if (verdict === "safe") return "safe";
+  if (verdict === "caution") return "warning";
+  if (verdict === "dangerous") return "blocked";
+  return undefined;
 }
 
 function trustForSource(source: SkillSourceKind): SkillTrust {
@@ -1188,6 +1333,13 @@ function generatedVersion(): string {
 }
 
 function atomicWrite(filePath: string, content: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, filePath);
+}
+
+function atomicWriteBytes(filePath: string, content: string | Uint8Array): void {
   mkdirSync(dirname(filePath), { recursive: true });
   const tmp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(tmp, content);

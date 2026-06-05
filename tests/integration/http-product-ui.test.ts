@@ -99,6 +99,12 @@ describe("HTTP product UI contract", () => {
 
     const apiPriority = await request("GET", "/sessions/local-preview");
     expect(apiPriority.status).toBe(404);
+    expect(apiPriority.headers["content-type"]).toContain("application/json");
+
+    const unknownApi = await request("GET", "/extensions/not-a-real-route");
+    expect(unknownApi.status).toBe(404);
+    expect(unknownApi.headers["content-type"]).toContain("application/json");
+    expect(unknownApi.data).toMatchObject({ error: "Unknown ForgeAgent API route." });
 
     const spaFallback = await request("GET", "/console/session/local-preview");
     expect(spaFallback.status).toBe(200);

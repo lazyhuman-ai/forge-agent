@@ -16,10 +16,12 @@ import { cronDeleteTool } from "./cron-delete.js";
 import { askUserTool } from "./ask-user.js";
 import { readArtifactTool } from "./read-artifact.js";
 import { browserTools } from "./browser-tools.js";
+import { extensionTools } from "./extension-tools.js";
 
 export const builtInTools = [
   askUserTool,
   readArtifactTool,
+  ...extensionTools,
   ...browserTools,
   readFileTool,
   writeFileTool,

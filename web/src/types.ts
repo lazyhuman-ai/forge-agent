@@ -177,6 +177,93 @@ export type McpToolMetadata = {
   readOnly: boolean;
 };
 
+export type ExtensionKind = "skill" | "mcp_server" | "bundle";
+
+export type ExtensionCandidate = {
+  id: string;
+  kind: ExtensionKind;
+  name: string;
+  title: string;
+  description: string;
+  source: string;
+  sourceLabel: string;
+  trust: "official" | "curated" | "trusted" | "community" | "untrusted" | "quarantined" | "local";
+  installed: boolean;
+  enabled: boolean;
+  status: "available" | "installed" | "active" | "disabled" | "quarantined" | "invalid";
+  capabilities: string[];
+  riskSummary: string;
+  installInput: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  recommended?: boolean;
+  setupRequired?: boolean;
+  reviewState?: "safe" | "warning" | "blocked" | "setup_required";
+  reviewAction?: "none" | "trust_enable" | "fix_required" | "setup_required";
+  postInstall?: string;
+  lock?: Record<string, unknown>;
+  registrySourceId?: string;
+};
+
+export type ExtensionRegistrySource = {
+  id: string;
+  kind: "builtin" | "file" | "http" | "github";
+  name: string;
+  enabled: boolean;
+  url?: string;
+  path?: string;
+  trust: ExtensionCandidate["trust"];
+  trustUnsigned?: boolean;
+  addedAt: string;
+  updatedAt: string;
+  lastRefreshAt?: string;
+  lastError?: string;
+};
+
+export type ExtensionEventRecord = {
+  seq: number;
+  timestamp: string;
+  detail: string;
+  message: string;
+  extensionId?: string;
+  kind?: ExtensionKind;
+  sourceId?: string;
+  payload?: Record<string, unknown>;
+};
+
+export type ExtensionStatus = {
+  skills: {
+    status: SkillStatus;
+    sources: Array<Record<string, unknown>>;
+    entries: Array<Record<string, unknown>>;
+  };
+  mcp: {
+    servers: McpServerStatus[];
+    tools: McpToolMetadata[];
+    catalog: Array<Record<string, unknown>>;
+  };
+  counts: {
+    installed: number;
+    enabled: number;
+    quarantined: number;
+    invalid: number;
+  };
+  registry: {
+    sources: ExtensionRegistrySource[];
+    entries: Array<Record<string, unknown>>;
+    locks: Array<Record<string, unknown>>;
+    events: ExtensionEventRecord[];
+    diagnostics: string[];
+  };
+};
+
+export type ExtensionInstallResult = {
+  kind: ExtensionKind;
+  id: string;
+  name: string;
+  status: "installed" | "active" | "quarantined" | "invalid";
+  message: string;
+};
+
 export type McpElicitationRequest = {
   id: string;
   sessionId: string;

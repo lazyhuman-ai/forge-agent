@@ -3,6 +3,7 @@ import type {
   PermissionResponseEvent,
 } from "../streams/event-types.js";
 import type { ToolCapability, ToolDefinition } from "../tools/schemas.js";
+import type { PathSandbox } from "../sandbox/path-sandbox.js";
 import { getSensitivePathReason } from "../sandbox/path-sandbox.js";
 
 export type ToolRequestSource = {
@@ -66,6 +67,7 @@ export type ToolPolicyInput = {
   tool: ToolDefinition;
   args: Record<string, unknown>;
   source?: ToolRequestSource;
+  pathSandbox?: PathSandbox;
 };
 
 export type ToolPolicyDecision = {
@@ -149,6 +151,194 @@ function subjectFromArgs(toolName: string, args: Record<string, unknown>): strin
 
 function pathFromArgs(args: Record<string, unknown>): string | null {
   return firstString(args, ["file_path", "path"]);
+}
+
+function isPureFilesystemWrite(capabilities: ToolCapability[]): boolean {
+  return capabilities.length === 1 && capabilities[0] === "fs.write";
+}
+
+type ShellToken =
+  | { type: "word"; value: string }
+  | { type: "op"; value: "&&" | ";" | "|" };
+
+const SAFE_BASH_COMMANDS = new Set([
+  "pwd",
+  "cd",
+  "ls",
+  "find",
+  "fd",
+  "tree",
+  "cat",
+  "head",
+  "tail",
+  "wc",
+  "grep",
+  "rg",
+  "sort",
+  "uniq",
+  "cut",
+  "date",
+  "whoami",
+  "uname",
+  "true",
+  "false",
+]);
+
+const SAFE_GIT_SUBCOMMANDS = new Set([
+  "status",
+  "diff",
+  "log",
+  "show",
+  "branch",
+  "rev-parse",
+  "ls-files",
+  "grep",
+  "blame",
+  "remote",
+]);
+
+const FIND_WRITE_OPTIONS = new Set([
+  "-delete",
+  "-exec",
+  "-execdir",
+  "-ok",
+  "-okdir",
+  "-fls",
+  "-fprint",
+  "-fprint0",
+]);
+
+function tokenizeShellCommand(command: string): ShellToken[] | null {
+  const tokens: ShellToken[] = [];
+  let current = "";
+  let quote: "'" | "\"" | null = null;
+
+  const pushWord = (): void => {
+    if (current) {
+      tokens.push({ type: "word", value: current });
+      current = "";
+    }
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]!;
+    const next = command[i + 1];
+
+    if (!quote && (char === "\n" || char === "\r" || char === "`" || char === "<" || char === ">")) {
+      return null;
+    }
+    if (!quote && char === "$" && next === "(") return null;
+    if (!quote && char === "\\") {
+      if (next === undefined) return null;
+      current += next;
+      i++;
+      continue;
+    }
+    if (quote && char === quote) {
+      quote = null;
+      continue;
+    }
+    if (!quote && (char === "'" || char === "\"")) {
+      quote = char;
+      continue;
+    }
+    if (!quote && /\s/.test(char)) {
+      pushWord();
+      continue;
+    }
+    if (!quote && char === "&") {
+      if (next !== "&") return null;
+      pushWord();
+      tokens.push({ type: "op", value: "&&" });
+      i++;
+      continue;
+    }
+    if (!quote && char === "|") {
+      if (next === "|") return null;
+      pushWord();
+      tokens.push({ type: "op", value: "|" });
+      continue;
+    }
+    if (!quote && char === ";") {
+      pushWord();
+      tokens.push({ type: "op", value: ";" });
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (quote) return null;
+  pushWord();
+  return tokens.length > 0 ? tokens : null;
+}
+
+function splitShellSegments(tokens: ShellToken[]): string[][] | null {
+  const segments: string[][] = [];
+  let current: string[] = [];
+  for (const token of tokens) {
+    if (token.type === "word") {
+      current.push(token.value);
+      continue;
+    }
+    if (current.length === 0) return null;
+    segments.push(current);
+    current = [];
+  }
+  if (current.length === 0) return null;
+  segments.push(current);
+  return segments;
+}
+
+function hasBlockedShellExpansion(words: string[]): boolean {
+  return words.some((word) => word.includes("$") || word.startsWith("~"));
+}
+
+function pathTokenAllowed(input: ToolPolicyInput, token: string): boolean {
+  if (token.startsWith("-")) return true;
+  if (getSensitivePathReason(token)) return false;
+  if (!input.pathSandbox) return false;
+  return input.pathSandbox.resolvePath(token, "read", input.tool.name, "process.exec").ok;
+}
+
+function commandPathsAllowed(input: ToolPolicyInput, words: string[]): boolean {
+  return words.every((word) => pathTokenAllowed(input, word));
+}
+
+function safeGitCommand(input: ToolPolicyInput, words: string[]): boolean {
+  const subcommand = words[1];
+  if (!subcommand || !SAFE_GIT_SUBCOMMANDS.has(subcommand)) return false;
+  const args = words.slice(2);
+  if (subcommand === "remote" && args.some((word) => word !== "-v")) {
+    return false;
+  }
+  return commandPathsAllowed(input, args);
+}
+
+function safeBashSegment(input: ToolPolicyInput, words: string[]): boolean {
+  if (words.length === 0 || hasBlockedShellExpansion(words)) return false;
+  const command = words[0]!;
+  if (command.includes("/")) return false;
+  if (command === "git") return safeGitCommand(input, words);
+  if (!SAFE_BASH_COMMANDS.has(command)) return false;
+  if (command === "find" && words.some((word) => FIND_WRITE_OPTIONS.has(word))) return false;
+  if (command === "rg" && words.some((word) => word === "--pre" || word.startsWith("--pre="))) {
+    return false;
+  }
+  return commandPathsAllowed(input, words.slice(1));
+}
+
+function safeBashCommandReason(input: ToolPolicyInput): string | null {
+  if (input.tool.name !== "bash") return null;
+  if (input.args.run_in_background === true) return null;
+  const command = firstString(input.args, ["command"]);
+  if (!command) return null;
+  const tokens = tokenizeShellCommand(command);
+  if (!tokens) return null;
+  const segments = splitShellSegments(tokens);
+  if (!segments) return null;
+  if (!segments.every((segment) => safeBashSegment(input, segment))) return null;
+  return "Read-only shell inspection commands inside the workspace are allowed by default policy.";
 }
 
 function decisionRank(decision: ToolPolicyDecisionKind): number {
@@ -257,6 +447,33 @@ export class ToolPolicyManager {
           reason: sensitive,
         };
       }
+
+      if (isPureFilesystemWrite(capabilities) && input.pathSandbox) {
+        const resolved = input.pathSandbox.resolvePath(
+          requestedPath,
+          "write",
+          input.tool.name,
+          "fs.write",
+        );
+        if (resolved.ok) {
+          return {
+            decision: "allow",
+            action,
+            subject,
+            reason: "Filesystem writes inside the allowed workspace roots are allowed by default policy.",
+          };
+        }
+      }
+    }
+
+    const safeBashReason = safeBashCommandReason(input);
+    if (safeBashReason) {
+      return {
+        decision: "allow",
+        action,
+        subject,
+        reason: safeBashReason,
+      };
     }
 
     if (capabilities.some((capability) => ASK_CAPABILITIES.has(capability))) {

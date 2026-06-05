@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { resolve } from "node:path";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
 import { ToolRuntime } from "../src/tools/tool-runtime.js";
 import { PermissionBroker } from "../src/permissions/tool-policy.js";
+import { PathSandbox } from "../src/sandbox/path-sandbox.js";
 import type { PermissionRequestEvent, PermissionResponseEvent } from "../src/streams/event-types.js";
 
 describe("ToolRuntime", () => {
@@ -137,6 +139,47 @@ describe("ToolRuntime", () => {
     expect(String(result.output)).toContain("no interactive approval channel");
     expect(String(result.output)).toContain("Recovery:");
     expect(events.map((event) => event.type)).toEqual(["permission_request", "permission_response"]);
+  });
+
+  it("allows workspace fs.write tools without approval", async () => {
+    let called = false;
+    const events: Array<PermissionRequestEvent | PermissionResponseEvent> = [];
+    const broker = new PermissionBroker({
+      timeoutMs: 50,
+      nextSeq: (() => {
+        let seq = 1;
+        return () => seq++;
+      })(),
+      now: () => new Date(0).toISOString(),
+      appendSessionEvent: (_sid, event) => events.push(event),
+    });
+
+    registry.register({
+      name: "writer",
+      description: "Writes",
+      params: {},
+      capabilities: ["fs.write"],
+      handler: async () => {
+        called = true;
+        return "wrote";
+      },
+    });
+
+    const result = await runtime.execute(
+      "writer",
+      { file_path: resolve("src/generated.ts") },
+      "s1",
+      {
+        permissionBroker: broker,
+        pathSandbox: new PathSandbox({ projectRoot: resolve(".") }),
+        source: { kind: "trigger", interactive: false },
+      },
+    );
+
+    expect(called).toBe(true);
+    expect(result.isError).toBe(false);
+    expect(result.output).toBe("wrote");
+    expect(events).toEqual([]);
   });
 
   it("allows read-only capability tools by default policy", async () => {

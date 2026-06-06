@@ -24,19 +24,33 @@ Usage:
 `);
 }
 
-function flag(name: string): string | undefined {
-  const index = process.argv.indexOf(name);
+function flag(name: string, argv = process.argv): string | undefined {
+  const index = argv.indexOf(name);
   if (index < 0) return undefined;
-  return process.argv[index + 1];
+  return argv[index + 1];
 }
 
-function hasFlag(name: string): boolean {
-  return process.argv.includes(name);
+function hasFlag(name: string, argv = process.argv): boolean {
+  return argv.includes(name);
 }
 
-function makeApi(): CoreAPI {
+function commandArgs(): string[] {
+  const args = process.argv.slice(3);
+  const clean: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--data-dir") {
+      i++;
+      continue;
+    }
+    clean.push(arg);
+  }
+  return clean;
+}
+
+function makeApi(dataDir: string): CoreAPI {
   const registry = new ToolRegistry();
-  const api = new CoreAPI(registry);
+  const api = new CoreAPI(registry, { dataDir });
   api.registerBuiltInTools();
   api.initToolPolicy();
   api.initSkillEcosystem({ autoRun: false });
@@ -52,7 +66,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  const api = makeApi();
+  const dataDir = flag("--data-dir") ?? process.env.FORGE_DATA_DIR ?? ".forge";
+  const args = commandArgs();
+  const api = makeApi(dataDir);
   if (command === "status") {
     console.log(JSON.stringify(api.getExtensions(), null, 2));
     return;
@@ -75,7 +91,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "search") {
-    const query = process.argv.slice(3).join(" ").trim();
+    const query = args.join(" ").trim();
     const candidates = api.searchExtensions({ query, includeInstalled: true });
     if (candidates.length === 0) {
       console.log("No matching extensions found.");
@@ -94,7 +110,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "install-skill") {
-    const name = process.argv[3];
+    const name = args[0];
     if (!name) throw new Error("Missing skill name.");
     const input: ExtensionInstallInput = {
       kind: "skill",
@@ -112,7 +128,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "install-skill-github") {
-    const url = process.argv[3];
+    const url = args[0];
     if (!url) throw new Error("Missing GitHub/raw SKILL.md URL.");
     const input: ExtensionInstallInput = {
       kind: "skill_github",
@@ -128,7 +144,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "install-bundle") {
-    const bundleName = process.argv[3];
+    const bundleName = args[0];
     if (!bundleName) throw new Error("Missing bundle name.");
     const [candidate] = api.searchExtensions({ query: bundleName, includeInstalled: true })
       .filter((item) => item.kind === "bundle" && item.name === bundleName);
@@ -138,7 +154,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "install-mcp-catalog") {
-    const catalogId = process.argv[3];
+    const catalogId = args[0];
     if (!catalogId) throw new Error("Missing MCP catalog id.");
     console.log(JSON.stringify(await api.installExtension({
       kind: "mcp_catalog",
@@ -149,11 +165,11 @@ async function main(): Promise<void> {
   }
 
   if (command === "add-mcp") {
-    const name = process.argv[3];
+    const name = args[0];
     const commandFlag = flag("--command");
     if (!name) throw new Error("Missing MCP server name.");
     if (!commandFlag) throw new Error("Missing --command.");
-    const args = flag("--args")?.split(",").map((part) => part.trim()).filter(Boolean);
+    const mcpArgs = flag("--args")?.split(",").map((part) => part.trim()).filter(Boolean);
     console.log(JSON.stringify(await api.installExtension({
       kind: "mcp_server",
       server: {
@@ -163,7 +179,7 @@ async function main(): Promise<void> {
         launchMode: "lazy",
         trust: "untrusted",
         command: commandFlag,
-        ...(args ? { args } : {}),
+        ...(mcpArgs ? { args: mcpArgs } : {}),
         source: "local",
       },
       enable: hasFlag("--enable"),
@@ -172,8 +188,8 @@ async function main(): Promise<void> {
   }
 
   if (command === "enable") {
-    const kind = process.argv[3];
-    const id = process.argv[4];
+    const kind = args[0];
+    const id = args[1];
     if (kind !== "skill" && kind !== "mcp_server" && kind !== "bundle") {
       throw new Error("Kind must be skill, mcp_server, or bundle.");
     }
@@ -193,7 +209,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "add-source") {
-    const name = process.argv[3];
+    const name = args[0];
     const kind = flag("--kind");
     if (!name) throw new Error("Missing source name.");
     if (kind !== "http" && kind !== "github" && kind !== "file") throw new Error("--kind must be http, github, or file.");
@@ -207,14 +223,14 @@ async function main(): Promise<void> {
   }
 
   if (command === "refresh-source") {
-    const id = process.argv[3];
+    const id = args[0];
     if (!id) throw new Error("Missing source id.");
     console.log(JSON.stringify(await api.refreshExtensionSource(id), null, 2));
     return;
   }
 
   if (command === "events") {
-    const afterSeq = Number(process.argv[3] ?? 0);
+    const afterSeq = Number(args[0] ?? 0);
     console.log(JSON.stringify(api.getExtensionEvents(Number.isFinite(afterSeq) ? afterSeq : 0), null, 2));
     return;
   }

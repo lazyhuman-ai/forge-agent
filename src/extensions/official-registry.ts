@@ -200,6 +200,7 @@ export const BUILTIN_EXTENSION_REGISTRY: ExtensionRegistryEntry[] = [
     ["mcp-server-pdf", "PDF", "@modelcontextprotocol/server-pdf", "1.7.3", "PDF/document inspection workflows.", ["pdf", "documents"]],
     ["mcp-server-map", "Map", "@modelcontextprotocol/server-map", "1.7.3", "Map and geospatial workflows.", ["map", "geo"]],
     ["mcp-server-threejs", "Three.js", "@modelcontextprotocol/server-threejs", "1.7.3", "Three.js scene and 3D asset workflows.", ["threejs", "3d"]],
+    ["mcp-server-blender", "Blender", "blender-mcp", "1.6.1", "Blender scene, material, camera, screenshot, and render workflows through Blender MCP.", ["blender", "3d", "rendering", "creative"]],
   ].map(([id, title, pkg, version, description, tags]) => ({
     id: `mcp-catalog:${id}`,
     kind: "mcp_server" as const,
@@ -221,6 +222,12 @@ export const BUILTIN_EXTENSION_REGISTRY: ExtensionRegistryEntry[] = [
       url: `https://www.npmjs.com/package/${encodeURIComponent(String(pkg)).replace("%40", "@").replace("%2F", "/")}`,
     },
     tags: tags as string[],
+    ...(String(id) === "mcp-server-blender"
+      ? {
+        setupRequired: true,
+        postInstall: "Install Blender 3.0+ and start the Blender MCP add-on/socket in Blender before using tools. ForgeAgent will run uvx blender-mcp and connect to localhost:9876.",
+      }
+      : {}),
   })),
   {
     id: "skill:serenity-invest-skill",

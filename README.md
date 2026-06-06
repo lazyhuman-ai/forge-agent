@@ -123,6 +123,8 @@ npm run webridge:open
 
 ForgeAgent 可以作为 MCP client 连接外部 MCP server。MCP 工具仍会走 ForgeAgent 的权限、沙盒、artifact 和 thread 机制。
 
+想从零跑通一个真实 MCP 场景，可以看：[ForgeAgent + Blender MCP Quick Start](docs/blender-mcp-quickstart.md)。这份教程会从 clone 仓库、打包 macOS App、启动 Blender MCP、注册 server 到最终渲染 PNG 一步步走完。
+
 常用命令：
 
 ```sh
@@ -133,6 +135,24 @@ npm run mcp -- doctor
 ```
 
 项目里的 `.mcp.json` 默认只会被发现，不会自动信任或启用。需要用户确认后才会进入可用工具集。
+
+如果你要安装 ForgeAgent 内置列表里没有的 MCP，优先从该 MCP 的官方 README、Claude Desktop 配置示例或包管理器说明里复制真实配置。关键字段是 `transport`、`command`、`args`、`env`、`url` 和鉴权方式，不要只凭 GitHub 仓库名猜命令。可以在 **Extensions** 里粘贴 npm package / GitHub link 让 ForgeAgent 尝试识别；识别不了或需要精确参数时，用 CLI 显式注册：
+
+```sh
+DATA_DIR="$HOME/Library/Application Support/ForgeAgent/data"
+
+npm run mcp -- add \
+  --data-dir "$DATA_DIR" \
+  --name my-server \
+  --transport stdio \
+  --command npx \
+  --args "-y,@example/mcp-server,arg1,arg2" \
+  --env '{"EXAMPLE_API_KEY":"your-key"}' \
+  --trust untrusted \
+  --enabled
+```
+
+HTTP / SSE MCP 也可以通过 `--transport streamable-http|sse --url <url> --headers '{"Authorization":"Bearer ..."}'` 注册。通过 CLI 修改 macOS App 的数据目录后，重启 ForgeAgent Core 让运行中的 App 重新加载配置。
 
 ## 安装 Extensions：skills、tools、MCP 和 bundles
 
@@ -175,7 +195,7 @@ npm run extensions -- doctor
 
 当前内置推荐包括：
 
-- MCP：Filesystem、Everything、Memory、Sequential Thinking、GitHub、Brave Search、Puppeteer、Postgres、PDF、Map、Three.js
+- MCP：Filesystem、Everything、Memory、Sequential Thinking、GitHub、Brave Search、Puppeteer、Postgres、PDF、Map、Three.js、Blender
 - Skills：Serenity Invest、Code Reviewer、Frontend Design
 - Bundles：Code Review Workspace、Design Reference、Investor Research、PDF Research
 

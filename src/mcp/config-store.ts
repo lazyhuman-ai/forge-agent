@@ -235,6 +235,27 @@ const BUILTIN_CATALOG: McpCatalogEntry[] = [
     auth: { type: "none" },
     tags: ["threejs", "3d"],
   },
+  {
+    id: "mcp-server-blender",
+    name: "Blender",
+    description: "Blender MCP server for controlling Blender scenes, materials, cameras, screenshots, and renders through a Blender-side socket add-on.",
+    transport: "stdio",
+    command: "uvx",
+    args: ["blender-mcp"],
+    trust: "trusted",
+    sourceUrl: "https://github.com/ahujasid/blender-mcp",
+    packageName: "blender-mcp",
+    packageVersion: "1.6.1",
+    auth: { type: "none" },
+    env: {
+      BLENDER_HOST: "localhost",
+      BLENDER_PORT: "9876",
+      DISABLE_TELEMETRY: "true",
+    },
+    setupRequired: true,
+    postInstall: "Install Blender 3.0+ and start the Blender MCP add-on/socket in Blender before using tools. The MCP server connects to BLENDER_HOST:BLENDER_PORT.",
+    tags: ["blender", "3d", "rendering", "creative"],
+  },
 ];
 
 function cloneCatalogEntry(entry: McpCatalogEntry): McpCatalogEntry {

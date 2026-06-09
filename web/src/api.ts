@@ -169,11 +169,18 @@ export const api = {
       body: form,
     });
   },
-  transcribeVoice: (audio: Blob) => {
+  transcribeVoice: (audio: Blob, options?: { mode?: "final" | "preview" }) => {
     const form = new FormData();
-    const extension = audio.type.includes("mp4") ? "mp4" : audio.type.includes("ogg") ? "ogg" : "webm";
+    const extension = audio.type.includes("wav")
+      ? "wav"
+      : audio.type.includes("mp4")
+        ? "mp4"
+        : audio.type.includes("ogg")
+          ? "ogg"
+          : "webm";
     form.append("audio", audio, `voice-input.${extension}`);
-    return apiFetch<{ text: string; model: string; language: string }>("/voice/transcriptions", {
+    const query = options?.mode === "preview" ? "?mode=preview" : "";
+    return apiFetch<{ text: string; model: string; language: string }>(`/voice/transcriptions${query}`, {
       method: "POST",
       body: form,
     });

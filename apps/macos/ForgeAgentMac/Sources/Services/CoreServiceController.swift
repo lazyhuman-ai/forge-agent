@@ -263,7 +263,7 @@ final class CoreServiceController: ObservableObject {
         export FORGE_VOICE_PYTHON='\(shellQuote(voicePython))'
         export FORGE_WHISPER_MODEL='\(shellQuote(voiceModel))'
         export FORGE_VOICE_TRANSCRIBE_COMMAND='\(shellQuote(voiceTranscribe))'
-        export FORGE_VOICE_TRANSCRIBE_ARGS='{audio} {model} {language}'
+        export FORGE_VOICE_TRANSCRIBE_ARGS='{audio} {model} {language} {mode}'
         cd '\(shellQuote(coreRoot.path))'
         \(launchCommand)
         """
@@ -279,6 +279,7 @@ final class CoreServiceController: ObservableObject {
         AUDIO="$1"
         MODEL="$2"
         LANG="${3:-zh}"
+        MODE="${4:-final}"
         WORKDIR="$(dirname "$AUDIO")"
         EXT="${AUDIO:e:l}"
         INPUT="$AUDIO"
@@ -292,8 +293,12 @@ final class CoreServiceController: ObservableObject {
           if [[ -n "$TMP" && -f "$TMP" ]]; then rm -f "$TMP"; fi
         }
         trap cleanup EXIT
+        FAST_ARGS=()
+        if [[ "$MODE" == "preview" ]]; then
+          FAST_ARGS=(-bs 1 -bo 1 -nf)
+        fi
         cd "$WORKDIR"
-        /opt/homebrew/bin/whisper-cli -m "$MODEL" -f "$INPUT" -l "$LANG" -nt -np
+        /opt/homebrew/bin/whisper-cli -m "$MODEL" -f "$INPUT" -l "$LANG" -nt -np "${FAST_ARGS[@]}"
         """
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)

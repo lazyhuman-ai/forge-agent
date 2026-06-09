@@ -23,7 +23,7 @@ let server: http.Server;
 let api: CoreAPI;
 let gateway: HttpGateway;
 let applied: SetupStatus[];
-let voiceInputs: Array<{ audioPath: string; mimeType: string; existsDuringCall: boolean }>;
+let voiceInputs: Array<{ audioPath: string; mimeType: string; mode: "final" | "preview" | undefined; existsDuringCall: boolean }>;
 
 function request(method: string, path: string, body?: unknown): Promise<ResponseData> {
   return new Promise((resolve, reject) => {
@@ -143,6 +143,7 @@ describe("HTTP product UI contract", () => {
           voiceInputs.push({
             audioPath: input.audioPath,
             mimeType: input.mimeType,
+            mode: input.mode,
             existsDuringCall: existsSync(input.audioPath),
           });
           return { text: "你好 ForgeAgent", model: "local-belle", language: "zh" };
@@ -245,20 +246,20 @@ describe("HTTP product UI contract", () => {
     const multipart = multipartBody([
       {
         field: "audio",
-        filename: "voice.webm",
-        contentType: "audio/webm",
+        filename: "voice.wav",
+        contentType: "audio/wav",
         content: Buffer.from([1, 2, 3, 4]),
       },
     ]);
 
-    const transcribed = await requestRaw("POST", "/voice/transcriptions", multipart.body, {
+    const transcribed = await requestRaw("POST", "/voice/transcriptions?mode=preview", multipart.body, {
       "Content-Type": multipart.contentType,
     });
 
     expect(transcribed.status).toBe(200);
     expect(transcribed.data).toEqual({ text: "你好 ForgeAgent", model: "local-belle", language: "zh" });
     expect(voiceInputs).toHaveLength(1);
-    expect(voiceInputs[0]).toMatchObject({ mimeType: "audio/webm", existsDuringCall: true });
+    expect(voiceInputs[0]).toMatchObject({ mimeType: "audio/wav", mode: "preview", existsDuringCall: true });
     expect(existsSync(voiceInputs[0]!.audioPath)).toBe(false);
   });
 

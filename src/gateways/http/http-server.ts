@@ -2554,6 +2554,8 @@ async function handleRoute(
         sendError(res, 503, "Local voice input is disabled.", origin);
         return;
       }
+      const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+      const voiceMode = requestUrl.searchParams.get("mode") === "preview" ? "preview" : "final";
       const files = await parseMultipartFiles(req, options.voiceTranscription.maxBodyBytes);
       const audio = files.find((file) => file.fieldName === "audio") ?? files[0];
       if (!audio) {
@@ -2568,6 +2570,7 @@ async function handleRoute(
         const transcript = await transcribeVoiceAudio({
           audioPath,
           mimeType: audio.contentType,
+          mode: voiceMode,
         }, options.voiceTranscription);
         sendJson(res, 200, transcript, origin);
       } finally {

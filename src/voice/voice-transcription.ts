@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 export type VoiceTranscriptionInput = {
   audioPath: string;
   mimeType: string;
+  mode?: "final" | "preview";
 };
 
 export type VoiceTranscriptionResult = {
@@ -142,7 +143,7 @@ export async function transcribeVoiceAudio(
   const prepared = await prepareAudio(input.audioPath, input.mimeType, options);
   const outputPath = join(dirname(input.audioPath), `voice-transcript-${randomUUID()}.json`);
   try {
-    const command = buildCommand(prepared.audioPath, outputPath, options);
+    const command = buildCommand(prepared.audioPath, outputPath, options, input.mode ?? "final");
     const result = await execFileAsync(command.file, command.args, {
       cwd: dirname(prepared.audioPath),
       timeout: options.timeoutMs,
@@ -210,10 +211,14 @@ function buildCommand(
   audioPath: string,
   outputPath: string,
   options: ResolvedVoiceTranscriptionOptions,
+  mode: "final" | "preview",
 ): VoiceTranscriptionCommand {
   if (options.command) {
-    const args = options.command.args.map((arg) => interpolateArg(arg, audioPath, outputPath, options));
+    const args = options.command.args.map((arg) => interpolateArg(arg, audioPath, outputPath, options, mode));
     if (!args.some((arg) => arg === audioPath)) args.push(audioPath);
+    if (mode === "preview" && isWhisperCliCommand(options.command.file)) {
+      args.push(...previewWhisperCliArgs());
+    }
     return { file: options.command.file, args };
   }
   return {
@@ -232,12 +237,22 @@ function interpolateArg(
   audioPath: string,
   outputPath: string,
   options: ResolvedVoiceTranscriptionOptions,
+  mode: "final" | "preview",
 ): string {
   return arg
     .replaceAll("{audio}", audioPath)
     .replaceAll("{output}", outputPath)
     .replaceAll("{model}", options.model)
-    .replaceAll("{language}", options.language);
+    .replaceAll("{language}", options.language)
+    .replaceAll("{mode}", mode);
+}
+
+function isWhisperCliCommand(file: string): boolean {
+  return basename(file) === "whisper-cli";
+}
+
+function previewWhisperCliArgs(): string[] {
+  return ["-bs", "1", "-bo", "1", "-nf"];
 }
 
 function extractTranscriptText(output: string): string {

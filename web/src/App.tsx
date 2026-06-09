@@ -10,6 +10,7 @@ import { buildRenderEvents, type RenderEvent } from "./render-events";
 import { renderTerminalOutput } from "./terminal-renderer";
 import { sessionIndicator } from "./session-ui";
 import { nativeNotificationForEvent } from "./notifications";
+import { mergeRollingTranscript, mergeVoiceDraft } from "./voice-transcript";
 import type {
   DeviceState,
   Diagnostics,
@@ -32,11 +33,17 @@ type LoadState = "booting" | "ready" | "error";
 type MainView = "chat" | "extensions";
 type RailPanel = "provider" | "android" | "browser" | "mcp" | "context" | "permissions" | "notifications" | "memory" | "skills";
 type VoiceInputState = "idle" | "recording" | "transcribing";
+type VoiceSampleChunk = { start: number; end: number; samples: Float32Array };
 
 const LEFT_COLLAPSED_KEY = "forgeagent.web.leftCollapsed";
+const VOICE_PREVIEW_INTERVAL_MS = 2_000;
+const VOICE_PREVIEW_WINDOW_SECONDS = 10;
+const VOICE_PREVIEW_MAX_BYTES = 8 * 1024 * 1024;
+const VOICE_WAV_SAMPLE_RATE = 16_000;
 
 declare global {
   interface Window {
+    webkitAudioContext?: typeof AudioContext;
     webkit?: {
       messageHandlers?: {
         forgeNative?: {
@@ -78,12 +85,55 @@ function selectedBranchMap(state: DeviceState | null, sessionId: string, branchI
   };
 }
 
-function mergeVoiceDraft(current: string, transcript: string): string {
-  const text = transcript.trim();
-  if (!text) return current;
-  if (!current.trim()) return text;
-  const separator = /[\s\n]$/.test(current) ? "" : " ";
-  return `${current}${separator}${text}`;
+function resampleMono(samples: Float32Array, inputRate: number, outputRate: number): Float32Array {
+  if (inputRate === outputRate) return samples;
+  const ratio = inputRate / outputRate;
+  const outputLength = Math.max(1, Math.round(samples.length / ratio));
+  const output = new Float32Array(outputLength);
+  for (let index = 0; index < outputLength; index += 1) {
+    const start = Math.floor(index * ratio);
+    const end = Math.min(samples.length, Math.floor((index + 1) * ratio));
+    let sum = 0;
+    let count = 0;
+    for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+      sum += samples[sampleIndex] ?? 0;
+      count += 1;
+    }
+    output[index] = count > 0 ? sum / count : samples[start] ?? 0;
+  }
+  return output;
+}
+
+function encodeWav(samples: Float32Array, sampleRate: number): Blob {
+  const bytesPerSample = 2;
+  const dataBytes = samples.length * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buffer);
+  const writeString = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + dataBytes, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * bytesPerSample, true);
+  view.setUint16(32, bytesPerSample, true);
+  view.setUint16(34, 8 * bytesPerSample, true);
+  writeString(36, "data");
+  view.setUint32(40, dataBytes, true);
+  let offset = 44;
+  for (const sample of samples) {
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+    offset += bytesPerSample;
+  }
+  return new Blob([buffer], { type: "audio/wav" });
 }
 
 function withDeviceStateDefaults(state: DeviceState): DeviceState {
@@ -195,9 +245,21 @@ export function App() {
   const stickToBottomRef = useRef(true);
   const draftRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const voiceRecorderRef = useRef<MediaRecorder | null>(null);
-  const voiceChunksRef = useRef<BlobPart[]>([]);
+  const voiceAudioContextRef = useRef<AudioContext | null>(null);
+  const voiceProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const voiceSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const voiceStreamRef = useRef<MediaStream | null>(null);
+  const voiceSamplesRef = useRef<VoiceSampleChunk[]>([]);
+  const voiceSampleCountRef = useRef(0);
+  const voiceSampleRateRef = useRef(VOICE_WAV_SAMPLE_RATE);
+  const voicePreviewTimerRef = useRef<number | undefined>(undefined);
+  const voicePreviewTranscriptRef = useRef("");
+  const voiceBaseDraftRef = useRef("");
+  const voiceFinalizingRef = useRef(false);
+  const voicePreviewInFlightRef = useRef(false);
+  const voicePreviewPendingRef = useRef(false);
+  const voicePreviewSeqRef = useRef(0);
+  const voicePreviewPromiseRef = useRef<Promise<void> | null>(null);
   const terminalScrollRef = useRef<HTMLDivElement | null>(null);
   const terminalPaneRef = useRef<HTMLDivElement | null>(null);
   const terminalSourceRef = useRef<EventSource | null>(null);
@@ -698,67 +760,198 @@ export function App() {
   }, [terminalEvents, terminalOpen]);
 
   function stopVoiceStream() {
+    if (voicePreviewTimerRef.current !== undefined) {
+      window.clearInterval(voicePreviewTimerRef.current);
+      voicePreviewTimerRef.current = undefined;
+    }
+    voiceProcessorRef.current?.disconnect();
+    voiceSourceRef.current?.disconnect();
+    void voiceAudioContextRef.current?.close().catch(() => undefined);
+    voiceProcessorRef.current = null;
+    voiceSourceRef.current = null;
+    voiceAudioContextRef.current = null;
     voiceStreamRef.current?.getTracks().forEach((track) => track.stop());
     voiceStreamRef.current = null;
   }
 
+  function appendVoiceSamples(samples: Float32Array) {
+    const copy = new Float32Array(samples);
+    const start = voiceSampleCountRef.current;
+    const end = start + copy.length;
+    voiceSamplesRef.current.push({ start, end, samples: copy });
+    voiceSampleCountRef.current = end;
+  }
+
+  function collectVoiceSamples(startSample = 0): Float32Array {
+    const total = Math.max(0, voiceSampleCountRef.current - startSample);
+    const collected = new Float32Array(total);
+    let offset = 0;
+    for (const chunk of voiceSamplesRef.current) {
+      if (chunk.end <= startSample) continue;
+      const chunkStart = Math.max(startSample, chunk.start);
+      const from = chunkStart - chunk.start;
+      const to = chunk.end - chunk.start;
+      collected.set(chunk.samples.subarray(from, to), offset);
+      offset += to - from;
+    }
+    return collected;
+  }
+
+  function voicePreviewStartSample(): number {
+    return Math.max(
+      0,
+      voiceSampleCountRef.current - Math.round(voiceSampleRateRef.current * VOICE_PREVIEW_WINDOW_SECONDS),
+    );
+  }
+
+  function currentVoiceBlob(scope: "final" | "preview", startSample?: number): Blob {
+    const inputRate = voiceSampleRateRef.current;
+    const sampleStart = scope === "preview"
+      ? startSample ?? voicePreviewStartSample()
+      : 0;
+    const samples = collectVoiceSamples(sampleStart);
+    const resampled = resampleMono(samples, inputRate, VOICE_WAV_SAMPLE_RATE);
+    return encodeWav(resampled, VOICE_WAV_SAMPLE_RATE);
+  }
+
+  function applyVoiceTranscript(transcript: string) {
+    setDraft(mergeVoiceDraft(voiceBaseDraftRef.current, transcript));
+  }
+
+  async function requestVoicePreview() {
+    if (voiceFinalizingRef.current) return;
+    if (voicePreviewInFlightRef.current) {
+      voicePreviewPendingRef.current = true;
+      return;
+    }
+    if (voiceSampleCountRef.current < voiceSampleRateRef.current) return;
+    const windowStart = voicePreviewStartSample();
+    const blob = currentVoiceBlob("preview", windowStart);
+    if (blob.size === 0 || blob.size > VOICE_PREVIEW_MAX_BYTES) return;
+
+    voicePreviewInFlightRef.current = true;
+    voicePreviewPendingRef.current = false;
+    const seq = ++voicePreviewSeqRef.current;
+    const task = api.transcribeVoice(blob, { mode: "preview" }).then((result) => {
+      if (voiceFinalizingRef.current || seq !== voicePreviewSeqRef.current) return;
+      if (!result.text.trim()) return;
+      voicePreviewTranscriptRef.current = windowStart === 0
+        ? result.text.trim()
+        : mergeRollingTranscript(voicePreviewTranscriptRef.current, result.text);
+      applyVoiceTranscript(voicePreviewTranscriptRef.current);
+    }).catch(() => {
+      // Short rolling windows can be silence. The final pass reports real failures.
+    }).finally(() => {
+      voicePreviewInFlightRef.current = false;
+      if (
+        voicePreviewPendingRef.current &&
+        !voiceFinalizingRef.current &&
+        voiceState === "recording"
+      ) {
+        void requestVoicePreview();
+      }
+    });
+    voicePreviewPromiseRef.current = task;
+    await task;
+  }
+
+  async function finalizeVoiceRecording() {
+    if (voiceFinalizingRef.current) return;
+    voiceFinalizingRef.current = true;
+    setVoiceState("transcribing");
+    voicePreviewPendingRef.current = false;
+    voicePreviewSeqRef.current += 1;
+    if (voicePreviewTimerRef.current !== undefined) {
+      window.clearInterval(voicePreviewTimerRef.current);
+      voicePreviewTimerRef.current = undefined;
+    }
+    stopVoiceStream();
+
+    const pendingPreview = voicePreviewPromiseRef.current;
+    if (pendingPreview) await pendingPreview.catch(() => undefined);
+
+    const blob = currentVoiceBlob("final");
+    if (blob.size === 0) {
+      setVoiceState("idle");
+      voiceFinalizingRef.current = false;
+      voiceSamplesRef.current = [];
+      voiceSampleCountRef.current = 0;
+      return;
+    }
+    setVoiceState("transcribing");
+    try {
+      const result = await api.transcribeVoice(blob, { mode: "final" });
+      applyVoiceTranscript(result.text);
+      draftRef.current?.focus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      voiceSamplesRef.current = [];
+      voiceSampleCountRef.current = 0;
+      voicePreviewTranscriptRef.current = "";
+      voicePreviewPromiseRef.current = null;
+      voicePreviewInFlightRef.current = false;
+      voicePreviewPendingRef.current = false;
+      voiceFinalizingRef.current = false;
+      setVoiceState("idle");
+    }
+  }
+
   async function toggleVoiceInput() {
     if (voiceState === "recording") {
-      voiceRecorderRef.current?.stop();
+      void finalizeVoiceRecording();
       return;
     }
     if (voiceState !== "idle" || busy || selected?.status === "running") return;
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    const AudioContextCtor = window.AudioContext ?? window.webkitAudioContext;
+    if (!navigator.mediaDevices?.getUserMedia || !AudioContextCtor) {
       setError("Voice input is not available in this browser.");
       return;
     }
     setError("");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const audioContext = new AudioContextCtor();
+      await audioContext.resume();
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      processor.onaudioprocess = (event) => {
+        const input = event.inputBuffer.getChannelData(0);
+        appendVoiceSamples(input);
+        event.outputBuffer.getChannelData(0).fill(0);
+      };
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
       voiceStreamRef.current = stream;
-      voiceRecorderRef.current = recorder;
-      voiceChunksRef.current = [];
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) voiceChunksRef.current.push(event.data);
-      };
-      recorder.onerror = () => {
-        setError("Voice recording failed.");
-        setVoiceState("idle");
-        stopVoiceStream();
-      };
-      recorder.onstop = () => {
-        const mimeType = recorder.mimeType || "audio/webm";
-        const blob = new Blob(voiceChunksRef.current, { type: mimeType });
-        voiceRecorderRef.current = null;
-        voiceChunksRef.current = [];
-        stopVoiceStream();
-        if (blob.size === 0) {
-          setVoiceState("idle");
-          return;
-        }
-        setVoiceState("transcribing");
-        void api.transcribeVoice(blob).then((result) => {
-          setDraft((current) => mergeVoiceDraft(current, result.text));
-          draftRef.current?.focus();
-        }).catch((err) => {
-          setError(err instanceof Error ? err.message : String(err));
-        }).finally(() => {
-          setVoiceState("idle");
-        });
-      };
-      recorder.start();
+      voiceAudioContextRef.current = audioContext;
+      voiceSourceRef.current = source;
+      voiceProcessorRef.current = processor;
+      voiceSamplesRef.current = [];
+      voiceSampleCountRef.current = 0;
+      voiceSampleRateRef.current = audioContext.sampleRate;
+      voicePreviewTranscriptRef.current = "";
+      voiceBaseDraftRef.current = draft;
+      voiceFinalizingRef.current = false;
+      voicePreviewInFlightRef.current = false;
+      voicePreviewPendingRef.current = false;
+      voicePreviewSeqRef.current += 1;
+      voicePreviewPromiseRef.current = null;
+      voicePreviewTimerRef.current = window.setInterval(() => {
+        void requestVoicePreview();
+      }, VOICE_PREVIEW_INTERVAL_MS);
       setVoiceState("recording");
     } catch (err) {
       stopVoiceStream();
       setVoiceState("idle");
+      voiceFinalizingRef.current = false;
       setError(err instanceof Error ? err.message : String(err));
     }
   }
 
   async function submitMessage() {
     const text = draft.trim();
-    if ((!text && attachments.length === 0) || busy) return;
+    if ((!text && attachments.length === 0) || busy || voiceState !== "idle") return;
     if (!setup?.provider.configured) {
       setError("Configure DeepSeek before sending a message.");
       return;
@@ -1550,7 +1743,7 @@ export function App() {
               onChange={(event) => setDraft(event.target.value)}
               placeholder={selected?.status === "running" ? "ForgeAgent is running…" : "Ask ForgeAgent anything…"}
               rows={1}
-              disabled={selected?.status === "running"}
+              disabled={selected?.status === "running" || voiceState !== "idle"}
               onCompositionStart={composerEnterSubmit.onCompositionStart}
               onCompositionEnd={composerEnterSubmit.onCompositionEnd}
               onKeyDown={composerEnterSubmit.onKeyDown}
@@ -1560,7 +1753,7 @@ export function App() {
             <button
               className="send-button"
               onClick={() => void submitMessage()}
-              disabled={busy || selected?.status === "running" || (!draft.trim() && attachments.length === 0)}
+              disabled={busy || selected?.status === "running" || voiceState !== "idle" || (!draft.trim() && attachments.length === 0)}
             >
             Send
             </button>
